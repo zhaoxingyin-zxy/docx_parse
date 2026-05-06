@@ -12,7 +12,6 @@ dependencies = [
     "beautifulsoup4>=4.13.5,<5",
     "loguru>=0.7.2",
     "lxml>=4.0.0,<7.0.0",
-    "mammoth>=1.11.0,<2",
     "openpyxl>=3.1.5,<4",
     "packaging>=23",
     "pandas>=2.3.3,<3",

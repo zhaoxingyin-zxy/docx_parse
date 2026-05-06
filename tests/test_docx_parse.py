@@ -1,6 +1,9 @@
 import json
+import re
 from pathlib import Path
 
+import pytest
+from bs4 import BeautifulSoup
 from docx import Document
 from PIL import Image, ImageDraw
 
@@ -10,6 +13,25 @@ from docx_parse import (
     convert_docx_file_to_middle_json,
     convert_docx_file_to_model_output,
 )
+
+
+DOCX_01_PATH = Path(r"D:\zxy\code\MinerU-master\MinerU-master\demo\office_docs\docx_01.docx")
+DOCX_01_TABLE_BASELINE = Path(__file__).parent / "fixtures" / "docx_01_tables_baseline.json"
+
+
+def _table_records_from_jsonl(jsonl: str) -> list[dict]:
+    return [
+        record
+        for record in (json.loads(line) for line in jsonl.splitlines())
+        if record.get("type") == "table"
+    ]
+
+
+def _normalize_table_html(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for image in soup.find_all("img"):
+        image["src"] = "<image>"
+    return re.sub(r"\s+", " ", str(soup)).strip()
 
 
 def _make_sample_docx(path: Path, image_path: Path) -> None:
@@ -88,3 +110,19 @@ def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
     assert any(record.get("type") == "table" and "Answer" in record.get("table_body", "") for record in records)
     assert any(record.get("type") == "image" and record.get("img_path", "").startswith("images/") for record in records)
     assert all("page_idx" in record for record in records)
+
+
+def test_docx_01_table_output_matches_legacy_baseline():
+    if not DOCX_01_PATH.exists():
+        pytest.skip(f"local regression DOCX is missing: {DOCX_01_PATH}")
+
+    baseline_tables = json.loads(DOCX_01_TABLE_BASELINE.read_text(encoding="utf-8"))
+    current_tables = _table_records_from_jsonl(convert_docx_file_to_jsonl(DOCX_01_PATH))
+
+    assert len(current_tables) == len(baseline_tables) == 8
+    for current, baseline in zip(current_tables, baseline_tables):
+        assert current.get("table_caption", []) == baseline.get("table_caption", [])
+        assert current.get("page_idx") == baseline.get("page_idx")
+        assert _normalize_table_html(current["table_body"]) == _normalize_table_html(
+            baseline["table_body"]
+        )

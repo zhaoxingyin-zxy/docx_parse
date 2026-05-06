@@ -69,7 +69,7 @@ DOCX 文件
   -> union_make(..., MakeMode.CONTENT_LIST)    # JSONL 的记录来源
 ```
 
-其中 `DocxConverter` 是最核心的解析器，它负责把 WordprocessingML、python-docx 对象和 mammoth 输出整合成统一块结构。
+其中 `DocxConverter` 是最核心的解析器，它负责把 WordprocessingML、python-docx 对象和直接解析 OOXML 表格得到的结构整合成统一块结构。
 
 ## model output 是什么
 
@@ -143,21 +143,23 @@ docx_parse/model/docx/tools/math/omml.py
 
 - 段落中如果只有公式，生成 `equation` block。
 - 段落中如果文本和公式混合，公式会被包成 `<eq>...</eq>`，之后在 Markdown 阶段转成 `$...$`。
-- 表格中的 OMML 会额外处理，因为 mammoth 默认会静默丢弃表格单元格里的公式。
+- 表格中的 OMML 会在底层 XML 渲染时额外处理，避免表格单元格里的公式丢失。
 
 ## 表格处理逻辑
 
-表格由 `_handle_tables()` 处理。优先策略是：
+表格由 `_handle_tables()` 处理。当前策略是：
 
-1. 先用 mammoth 对完整 DOCX 进行 HTML 预解析，得到所有顶层表格。
-2. 解析到具体 `w:tbl` 时，按顺序取 mammoth 预解析的表格 HTML。
-3. 对表格 HTML 做清洗，只保留对结构有意义的标签和属性，例如 `table`、`tr`、`td`、`colspan`、`rowspan`。
-4. 对表格内图片和公式做补充处理。
+1. 直接读取当前 `w:tbl` 的 OOXML 节点。
+2. 按 `w:tr`、`w:tc` 渲染 HTML 表格结构。
+3. 将 `w:gridSpan` 转为 `colspan`，将 `w:vMerge` 转为 `rowspan` 并跳过续接单元格。
+4. 对单元格内段落、列表、嵌套表格、图片、超链接、run 样式和 OMML 公式做局部渲染。
+5. 对表格 HTML 做清洗，只保留对结构有意义的标签和属性，例如 `table`、`tr`、`td`、`colspan`、`rowspan`。
 
-为什么使用 mammoth：
+为什么改为直接 XML 渲染：
 
-- mammoth 对 Word 表格、列表、样式和图片上下文处理比较成熟。
-- 只解析孤立 `w:tbl` XML 容易丢编号、样式、图片等上下文。
+- 项目不再依赖 `mammoth`，避免不可用三方件阻断部署。
+- 需要保留表格中的合并单元格、嵌套表格、图片、公式和基础文本样式。
+- 对编号、图片关系、OMML 等上下文仍通过 `python-docx` 文档对象和 DOCX relationship 获取。
 
 ## 图片处理逻辑
 

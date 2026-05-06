@@ -15,11 +15,8 @@ from docx.text.hyperlink import Hyperlink
 from docx.text.run import Run
 from lxml import etree
 from pydantic import AnyUrl
-from mammoth.conversion import convert_document_element_to_html
-from mammoth.docx import body_xml
-
-from docx_parse.model.docx.tools.office_xml import read_str
 from docx_parse.model.docx.tools.math.omml import oMath2Latex
+from docx_parse.model.docx.table_xml import render_table_html
 from docx_parse.utils.docx_formatting import Formatting, Script
 from docx_parse.utils.enum_class import BlockType, ContentType
 from docx_parse.backend.utils.office_image import (
@@ -78,8 +75,6 @@ class DocxConverter:
         self.docx_obj = None
         self.pages = []
         self.cur_page = []
-        self._mammoth_tables_html: list = []   # 完整文档 mammoth 预解析的表格 HTML 列表
-        self._mammoth_table_idx: int = 0       # 当前预解析表格游标
         self.pre_num_id: int = -1  # 上一个处理元素的 numId
         self.pre_ilevel: int = -1  # 上一个处理元素的缩进等级, 用于判断列表层级
         self.list_block_stack: list = []  # 列表块堆栈
@@ -583,11 +578,8 @@ class DocxConverter:
         self._numbering_root = None
         self._numbering_root_loaded = False
         self._numbering_level_cache = {}
-        # 读取文件字节，以便 mammoth 和 python-docx 各自使用独立读取流
+        # 读取文件字节，先清理失效内部关系再交给 python-docx 解析。
         file_bytes = self._sanitize_missing_internal_relationships(file_stream.read())
-        # 使用完整文档 mammoth 转换预解析所有表格，获得完整上下文（编号/图片/样式等）
-        self._mammoth_tables_html = self._preparse_tables_with_mammoth(file_bytes)
-        self._mammoth_table_idx = 0
         self.docx_obj = Document(BytesIO(file_bytes))
         self.toc_anchor_set = self._collect_toc_anchor_set()
         # 预扫描文档，识别用作章节标题的列表numId
@@ -751,208 +743,9 @@ class DocxConverter:
             else:
                 logger.debug(f"Ignoring element in DOCX with tag: {tag_name}")
 
-    def _preparse_tables_with_mammoth(self, file_bytes: bytes) -> list:
-        """
-        使用 mammoth 完整文档转换预解析所有顶层表格的 HTML。
-
-        孤立模式下（仅传入 <w:tbl> XML 片段），mammoth 缺少编号定义
-        （word/numbering.xml）、样式（word/styles.xml）和关系
-        （word/_rels/document.xml.rels）等上下文，在遇到含列表项或图片
-        的单元格时会抛出 AttributeError。通过完整文档转换，mammoth 可
-        获得完整上下文，从而正确处理这些情况。
-
-        图片会被 mammoth 转换为内联 data-URI base64 格式（<img src="data:...">）。
-
-        注意：mammoth 不支持 OMML（Office Math Markup Language）公式，会静默丢弃
-        表格单元格内的公式。本方法在获取 mammoth HTML 后，会同步遍历原始 DOCX XML，
-        将丢失的公式重新注入对应的 HTML 单元格。
-
-        Returns:
-            list[str]: 文档中所有顶层表格的 HTML 字符串列表，按文档顺序排列
-        """
-        try:
-            import mammoth as _mammoth
-            from bs4 import BeautifulSoup as _BeautifulSoup
-
-            result = _mammoth.convert_to_html(BytesIO(file_bytes))
-            soup = _BeautifulSoup(result.value, 'html.parser')
-
-            # 仅保留顶层表格，排除嵌套在其他表格单元格内的子表格
-            all_tables = soup.find_all('table')
-            top_level_tables = [t for t in all_tables if not t.find_parent('table')]
-
-            # 同步加载 DOCX XML，获取所有顶层表格元素，用于公式注入
-            docx_obj = Document(BytesIO(file_bytes))
-            xml_top_tables = [
-                elem for elem in docx_obj.element.body
-                if etree.QName(elem).localname == 'tbl'
-            ]
-
-            logger.debug(
-                f"Pre-parsed {len(top_level_tables)} top-level tables via full mammoth conversion"
-            )
-
-            # 将 XML 表格中的 OMML 公式注入到 mammoth HTML 表格中
-            result_tables = []
-            for idx, html_table in enumerate(top_level_tables):
-                if idx < len(xml_top_tables):
-                    html_table = self._inject_equations_into_table(
-                        html_table, xml_top_tables[idx]
-                    )
-                result_tables.append(str(html_table))
-            return result_tables
-        except Exception as e:
-            logger.debug(f"Could not pre-parse tables with full mammoth conversion: {e}")
-            return []
-
-    def _inject_equations_into_table(self, html_table, xml_table):
-        """
-        将 DOCX XML 表格中的 OMML 公式注入到 mammoth 生成的 HTML 表格中。
-
-        mammoth 会静默丢弃 OMML（Office Math Markup Language）公式，导致含公式
-        的表格单元格在 HTML 中为空。本方法并行遍历 HTML 表格（BeautifulSoup 对象）
-        和 XML 表格（lxml 元素），对含有 OMML 公式的单元格用包含公式占位符的内容
-        替换原来的空内容。
-
-        Args:
-            html_table: BeautifulSoup 的 Tag 对象，代表 mammoth 生成的 <table> 元素
-            xml_table: lxml 的 Element 对象，代表原始 DOCX 中对应的 <w:tbl> 元素
-
-        Returns:
-            BeautifulSoup Tag: 注入公式后的 <table> 元素（原地修改并返回）
-        """
-        OMML_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
-        W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
-        # 快速检查：该表格是否含有任何公式
-        if not xml_table.findall(f".//{{{OMML_NS}}}oMath"):
-            return html_table
-
-        from bs4 import BeautifulSoup
-
-        html_rows = html_table.find_all('tr')
-        xml_rows = xml_table.findall(f"{{{W_NS}}}tr")
-
-        if len(html_rows) != len(xml_rows):
-            logger.debug(
-                f"Table row count mismatch when injecting equations: "
-                f"HTML {len(html_rows)} vs XML {len(xml_rows)}"
-            )
-            return html_table
-
-        for html_row, xml_row in zip(html_rows, xml_rows):
-            html_cells = html_row.find_all(['td', 'th'])
-            xml_cells = xml_row.findall(f"{{{W_NS}}}tc")
-
-            if len(html_cells) != len(xml_cells):
-                continue
-
-            for html_cell, xml_cell in zip(html_cells, xml_cells):
-                if not xml_cell.findall(f".//{{{OMML_NS}}}oMath"):
-                    continue
-
-                # 该单元格含公式，重建其 HTML 内容以保留公式
-                new_content = self._build_cell_html_with_equations(xml_cell)
-                if new_content:
-                    html_cell.clear()
-                    new_soup = BeautifulSoup(new_content, 'html.parser')
-                    for child in list(new_soup.children):
-                        html_cell.append(child)
-
-        return html_table
-
-    def _build_cell_html_with_equations(self, xml_cell) -> str:
-        """
-        为含 OMML 公式的表格单元格构建 HTML 内容字符串。
-
-        遍历单元格内的段落，将普通文本和 OMML 公式（转换为 LaTeX 占位符）
-        混合在一起，生成与 mammoth 输出风格一致的 HTML 片段。
-
-        Args:
-            xml_cell: lxml Element，代表 DOCX 中的 <w:tc> 元素
-
-        Returns:
-            str: 单元格内容的 HTML 字符串，如 "<p>text<eq>latex</eq></p>"；
-                 若单元格为空则返回空字符串
-        """
-        W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
-        parts = []
-        for child in xml_cell:
-            child_tag = etree.QName(child).localname
-            if child_tag == 'p':
-                para_html = self._build_paragraph_html_with_equations(child)
-                if para_html is not None:
-                    parts.append(para_html)
-            # 嵌套表格暂不处理，由外层逻辑负责
-        return ''.join(parts)
-
-    def _build_paragraph_html_with_equations(self, xml_para) -> Optional[str]:
-        """
-        为可能含 OMML 公式的段落构建 HTML 字符串。
-
-        使用与 _handle_equations_in_text 相同的迭代逻辑：
-        - 普通 <w:t> 元素的文本直接收集
-        - <m:oMath> 元素转换为 LaTeX 并包装为公式占位符 <eq>...</eq>
-        - <m:t> 等 math 命名空间下的 <t> 元素因标签中含 "math" 而被跳过，
-          避免在 oMath2Latex 已处理整个 oMath 子树后重复提取
-
-        Args:
-            xml_para: lxml Element，代表 DOCX 中的 <w:p> 元素
-
-        Returns:
-            str | None: 格式为 "<p>...</p>" 的 HTML 字符串；段落为空时返回 None
-        """
-        items = []
-        for subt in xml_para.iter():
-            tag_name = etree.QName(subt).localname
-            # 普通文本节点（排除 math 命名空间下的 <m:t>）
-            if tag_name == 't' and 'math' not in subt.tag:
-                if isinstance(subt.text, str) and subt.text:
-                    items.append(subt.text)
-            # OMML 公式元素（排除 oMathPara 容器避免重复处理）
-            elif 'oMath' in subt.tag and 'oMathPara' not in subt.tag:
-                try:
-                    latex = str(oMath2Latex(subt)).strip()
-                    if latex:
-                        items.append(self.equation_bookends.format(EQ=latex))
-                except Exception as e:
-                    logger.debug(f"Failed to convert OMML equation to LaTeX: {e}")
-
-        if not items:
-            return None
-        return f'<p>{"".join(items)}</p>'
-
     def _handle_tables(self, element: BaseOxmlElement):
-        """
-        处理表格。
-
-        优先使用完整文档 mammoth 转换的预解析结果（支持列表、图片、样式等
-        复杂单元格内容），若预解析结果耗尽则回退到孤立 XML 解析模式。
-
-        Args:
-            element: 元素对象
-        Returns:
-            list[RefItem]: 元素引用列表
-        """
-        # 优先使用预解析表格（完整文档上下文，能正确处理列表/图片等）
-        if self._mammoth_table_idx < len(self._mammoth_tables_html):
-            html = self._mammoth_tables_html[self._mammoth_table_idx]
-            self._mammoth_table_idx += 1
-            html = self._normalize_table_colspans(html)
-            table_block = {
-                "type": BlockType.TABLE,
-                "content": html,
-            }
-            self.cur_page.append(table_block)
-            return
-
-        # 回退：孤立 XML 解析模式（原始方案，不含文档上下文）
-        table = read_str(element.xml)
-        body_reader = body_xml.reader()
-        t = body_reader.read_all([table])
-        res = convert_document_element_to_html(t.value[0])
-        html = self._normalize_table_colspans(res.value)
+        """Render a DOCX table directly from OOXML into HTML."""
+        html = self._normalize_table_colspans(render_table_html(self, element))
         table_block = {
             "type": BlockType.TABLE,
             "content": html,
@@ -964,7 +757,7 @@ class DocxConverter:
         修正 HTML 表格中因无线表/少线表导致的 colspan 不一致问题。
 
         在无边框或少边框的 DOCX 表格中，部分行的单元格包含 w:gridSpan 值，
-        该值来自 Word 内部虚拟栅格，并不反映实际视觉列数。mammoth 将这些
+        该值来自 Word 内部虚拟栅格，并不反映实际视觉列数。转换器若将这些
         w:gridSpan 值直接转换为 HTML colspan 属性，导致不同行的有效列数
         （所有 colspan 之和）不一致，产生行列对不齐的问题。
 
