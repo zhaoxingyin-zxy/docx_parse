@@ -594,7 +594,12 @@ class DocxConverter:
         self.heading_list_numids = self._detect_heading_list_numids()
         self.pages.append(self.cur_page)
         self._walk_linear(self.docx_obj.element.body)
-        self._add_header_footer(self.docx_obj)
+        try:
+            self._add_header_footer(self.docx_obj)
+        except RecursionError as e:
+            logger.warning(f"Skipping DOCX header/footer parsing due to recursive section references: {e}")
+        except Exception as e:
+            logger.warning(f"Skipping DOCX header/footer parsing: {e}")
 
     def _reset_index_state(self) -> None:
         """重置目录索引栈，避免相隔的多个目录块被错误合并。"""
