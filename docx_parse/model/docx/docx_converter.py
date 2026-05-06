@@ -1624,7 +1624,10 @@ class DocxConverter:
         if outline_lvl is None:
             return None
 
-        return self._str_to_int(outline_lvl.get(self.XML_KEY), None)
+        level = self._str_to_int(outline_lvl.get(self.XML_KEY), None)
+        if level is None or level >= 9:
+            return None
+        return level
 
     def _get_numId_and_ilvl(
         self, paragraph: Paragraph

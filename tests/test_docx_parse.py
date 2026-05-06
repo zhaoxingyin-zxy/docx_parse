@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from bs4 import BeautifulSoup
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from PIL import Image, ImageDraw
 
 from docx_parse import (
@@ -64,6 +66,15 @@ def _make_sample_docx(path: Path, image_path: Path) -> None:
     doc.save(path)
 
 
+def _set_outline_level(paragraph, level: int) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    outline = p_pr.find(qn("w:outlineLvl"))
+    if outline is None:
+        outline = OxmlElement("w:outlineLvl")
+        p_pr.append(outline)
+    outline.set(qn("w:val"), str(level))
+
+
 def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
     docx_path = tmp_path / "sample.docx"
     source_image = tmp_path / "source.png"
@@ -110,6 +121,30 @@ def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
     assert any(record.get("type") == "table" and "Answer" in record.get("table_body", "") for record in records)
     assert any(record.get("type") == "image" and record.get("img_path", "").startswith("images/") for record in records)
     assert all("page_idx" in record for record in records)
+
+
+def test_outline_level_9_is_treated_as_body_text(tmp_path):
+    docx_path = tmp_path / "outline_body.docx"
+    doc = Document()
+    heading = doc.add_heading("Real Heading", level=2)
+    assert heading.text == "Real Heading"
+    paragraph = doc.add_paragraph("Body paragraph with DOCX outline level 9.")
+    _set_outline_level(paragraph, 9)
+    doc.save(docx_path)
+
+    markdown = convert_docx_file_to_markdown(docx_path)
+    jsonl = convert_docx_file_to_jsonl(docx_path)
+    records = [json.loads(line) for line in jsonl.splitlines()]
+
+    assert "## " in markdown
+    assert "Real Heading" in markdown
+    assert "##########" not in markdown
+    assert "Body paragraph with DOCX outline level 9." in markdown
+    assert not any(
+        record.get("text") == "Body paragraph with DOCX outline level 9."
+        and record.get("text_level") == 10
+        for record in records
+    )
 
 
 def test_docx_01_table_output_matches_legacy_baseline():
