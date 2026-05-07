@@ -102,6 +102,34 @@ def _append_simple_omml_text(paragraph, text: str) -> None:
     paragraph._p.append(o_math)
 
 
+def _add_hyperlink(paragraph, text: str, url: str) -> None:
+    rel_id = paragraph.part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), rel_id)
+    run = OxmlElement("w:r")
+    text_element = OxmlElement("w:t")
+    text_element.text = text
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _append_sdt_text(paragraph, text: str) -> None:
+    sdt = OxmlElement("w:sdt")
+    sdt_content = OxmlElement("w:sdtContent")
+    run = OxmlElement("w:r")
+    text_element = OxmlElement("w:t")
+    text_element.text = text
+    run.append(text_element)
+    sdt_content.append(run)
+    sdt.append(sdt_content)
+    paragraph._p.append(sdt)
+
+
 def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
     docx_path = tmp_path / "sample.docx"
     source_image = tmp_path / "source.png"
@@ -252,6 +280,72 @@ def test_table_formula_plain_text_is_preserved_without_latex_conversion(tmp_path
 
     assert "formula: A=πr²" in table_record["table_body"]
     assert "<eq>" not in table_record["table_body"]
+
+
+def test_header_footer_parts_are_preserved(tmp_path):
+    docx_path = tmp_path / "header_footer.docx"
+    doc = Document()
+    section = doc.sections[0]
+    section.header.paragraphs[0].text = "Document Header"
+    section.footer.paragraphs[0].text = "Document Footer"
+    doc.add_paragraph("Body text")
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+
+    assert any(record.get("type") == "header" and record.get("text") == "Document Header" for record in records)
+    assert any(record.get("type") == "footer" and record.get("text") == "Document Footer" for record in records)
+    assert any(record.get("type") == "text" and record.get("text") == "Body text" for record in records)
+
+
+def test_fast_path_preserves_hyperlink_and_visible_styles(tmp_path):
+    docx_path = tmp_path / "complex_inline.docx"
+    doc = Document()
+    link_paragraph = doc.add_paragraph("Go to ")
+    _add_hyperlink(link_paragraph, "MinerU", "https://github.com/opendatalab/MinerU")
+
+    style_paragraph = doc.add_paragraph()
+    underline = style_paragraph.add_run("under")
+    underline.underline = True
+    style_paragraph.add_run(" ")
+    strike = style_paragraph.add_run("strike")
+    strike.font.strike = True
+
+    script_paragraph = doc.add_paragraph("x")
+    sup = script_paragraph.add_run("2")
+    sup.font.superscript = True
+    script_paragraph.add_run(" H")
+    sub = script_paragraph.add_run("2")
+    sub.font.subscript = True
+    script_paragraph.add_run("O")
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    texts = [record.get("text", "") for record in records if record.get("type") == "text"]
+    joined = "\n".join(texts)
+
+    assert "[MinerU](https://github.com/opendatalab/MinerU)" in joined
+    assert "<u>under</u>" in joined
+    assert "~~strike~~" in joined
+    assert "x2 H2O" in joined
+
+
+def test_fast_path_preserves_sdt_and_body_formula_text(tmp_path):
+    docx_path = tmp_path / "sdt_formula.docx"
+    doc = Document()
+    sdt_paragraph = doc.add_paragraph("prefix ")
+    _append_sdt_text(sdt_paragraph, "controlled text")
+    formula_paragraph = doc.add_paragraph("formula ")
+    _append_simple_omml_text(formula_paragraph, "A=πr²")
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    texts = [record.get("text", "") for record in records if record.get("type") == "text"]
+    joined = "\n".join(texts)
+
+    assert "prefix controlled text" in joined
+    assert "formula " in joined
+    assert any("A=" in text for text in texts)
 
 
 def _legacy_formula_text_parts(text: str) -> list[str]:
