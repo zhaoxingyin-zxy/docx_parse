@@ -107,6 +107,51 @@ class DocxConverter:
         self._paragraph_text_cache: dict[Any, str] = {}
         self._document_numbering_possible_cache: Optional[bool] = None
         self._header_footer_parts_cache: Optional[bool] = None
+        self.tolerant: bool = False
+        self.parse_errors: list[dict[str, Any]] = []
+        self._max_parse_errors: int = 100
+
+    def _record_parse_error(
+        self,
+        stage: str,
+        exc: Exception,
+        element: Optional[BaseOxmlElement] = None,
+        tag_name: Optional[str] = None,
+    ) -> None:
+        if len(self.parse_errors) >= self._max_parse_errors:
+            return
+        if tag_name is None and element is not None:
+            try:
+                tag_name = etree.QName(element).localname
+            except Exception:
+                tag_name = None
+        self.parse_errors.append(
+            {
+                "stage": stage,
+                "tag": tag_name,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+        )
+
+    def _run_tolerant(
+        self,
+        stage: str,
+        func,
+        *args,
+        element: Optional[BaseOxmlElement] = None,
+        tag_name: Optional[str] = None,
+    ):
+        try:
+            return func(*args)
+        except Exception as exc:
+            if not self.tolerant:
+                raise
+            self._record_parse_error(stage, exc, element=element, tag_name=tag_name)
+            logger.warning(
+                f"Skipping DOCX {stage} due to {type(exc).__name__}: {exc}"
+            )
+            return None
 
     @staticmethod
     def _escape_hyperlink_text(text: str) -> str:
@@ -575,6 +620,7 @@ class DocxConverter:
     def convert(
         self,
         file_stream: BinaryIO,
+        tolerant: bool = False,
     ):
         # 重置所有实例状态，确保同一实例多次调用 convert() 时不会残留上次的数据
         self.pages = []
@@ -600,6 +646,8 @@ class DocxConverter:
         self._paragraph_text_cache = {}
         self._document_numbering_possible_cache = None
         self._header_footer_parts_cache = None
+        self.tolerant = tolerant
+        self.parse_errors = []
         # 读取文件字节，先清理失效内部关系再交给 python-docx 解析。
         file_bytes = self._sanitize_missing_internal_relationships(file_stream.read())
         self.docx_obj = Document(BytesIO(file_bytes))
@@ -729,7 +777,13 @@ class DocxConverter:
                 ".//w:drawing", namespaces=DocxConverter._BLIP_NAMESPACES
             )
             if drawingml_els:
-                self._handle_drawingml(drawingml_els)
+                self._run_tolerant(
+                    "drawingml",
+                    self._handle_drawingml,
+                    drawingml_els,
+                    element=element,
+                    tag_name=tag_name,
+                )
 
             # 检查文本框内容（支持多种文本框格式）
             # 仅当该元素之前未被处理时才处理
@@ -783,7 +837,13 @@ class DocxConverter:
                     logger.debug(
                         f"Found textbox content with {len(textbox_elements)} elements"
                     )
-                    self._handle_textbox_content(textbox_elements)
+                    self._run_tolerant(
+                        "textbox",
+                        self._handle_textbox_content,
+                        textbox_elements,
+                        element=element,
+                        tag_name=tag_name,
+                    )
 
             if tag_name == "tbl":
                 # 表格是顶层块级元素，会中断活跃列表的上下文。
@@ -797,7 +857,9 @@ class DocxConverter:
                 try:
                     # 处理表格元素
                     self._handle_tables(element)
-                except Exception:
+                except Exception as exc:
+                    if self.tolerant:
+                        self._record_parse_error("table", exc, element=element, tag_name=tag_name)
                     # 如果表格解析失败，记录调试信息
                     logger.debug("could not parse a table, broken docx table")
             # 检查图片元素
@@ -811,14 +873,38 @@ class DocxConverter:
                 )
                 # 锚定图片在段落中浮动定位，段落文本应出现在图片之前
                 if is_anchored and tag_name == "p":
-                    self._handle_text_elements(element)
-                    self._handle_pictures(picture_refs)
+                    self._run_tolerant(
+                        "paragraph",
+                        self._handle_text_elements,
+                        element,
+                        element=element,
+                        tag_name=tag_name,
+                    )
+                    self._run_tolerant(
+                        "picture",
+                        self._handle_pictures,
+                        picture_refs,
+                        element=element,
+                        tag_name=tag_name,
+                    )
                 else:
                     # 处理图片元素
-                    self._handle_pictures(picture_refs)
+                    self._run_tolerant(
+                        "picture",
+                        self._handle_pictures,
+                        picture_refs,
+                        element=element,
+                        tag_name=tag_name,
+                    )
                     # 如果是段落元素，同时处理其中的文本内容（如描述性文字）
                     if tag_name == "p":
-                        self._handle_text_elements(element)
+                        self._run_tolerant(
+                            "paragraph",
+                            self._handle_text_elements,
+                            element,
+                            element=element,
+                            tag_name=tag_name,
+                        )
             # 检查 sdt 元素
             elif tag_name == "sdt":
                 sdt_content = element.find(
@@ -827,18 +913,36 @@ class DocxConverter:
                 if sdt_content is not None:
                     if self._is_toc_sdt(element):
                         # 处理目录SDT，转换为INDEX块
-                        self._handle_sdt_as_index(sdt_content)
+                        self._run_tolerant(
+                            "sdt_index",
+                            self._handle_sdt_as_index,
+                            sdt_content,
+                            element=element,
+                            tag_name=tag_name,
+                        )
                     else:
                         # 其他SDT元素，按普通文本处理
                         paragraphs = sdt_content.findall(
                             ".//w:p", namespaces=DocxConverter._BLIP_NAMESPACES
                         )
                         for p in paragraphs:
-                            self._handle_text_elements(p)
+                            self._run_tolerant(
+                                "sdt_paragraph",
+                                self._handle_text_elements,
+                                p,
+                                element=p,
+                                tag_name="p",
+                            )
             # 检查文本段落元素
             elif tag_name == "p":
                 # 处理文本元素（包括段落属性如"tcPr", "sectPr"等）
-                self._handle_text_elements(element)
+                self._run_tolerant(
+                    "paragraph",
+                    self._handle_text_elements,
+                    element,
+                    element=element,
+                    tag_name=tag_name,
+                )
 
             # 忽略其他未知元素并记录日志
             else:

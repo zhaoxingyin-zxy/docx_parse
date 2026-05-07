@@ -1005,6 +1005,7 @@ def merge_para_with_text_v2(para_block):
 def union_make(pdf_info_dict: list,
                make_mode: str,
                img_buket_path: str = '',
+               tolerant: bool = False,
                ):
 
     output_content = []
@@ -1015,15 +1016,42 @@ def union_make(pdf_info_dict: list,
         if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
             if not paras_of_layout:
                 continue
-            page_markdown = mk_blocks_to_markdown(paras_of_layout, make_mode, img_buket_path,
-                                                   page_idx=page_idx)
+            if tolerant:
+                page_markdown = []
+                for para_block in paras_of_layout:
+                    try:
+                        page_markdown.extend(
+                            mk_blocks_to_markdown(
+                                [para_block],
+                                make_mode,
+                                img_buket_path,
+                                page_idx=page_idx,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Skipping DOCX markdown block on page {page_idx} "
+                            f"due to {type(exc).__name__}: {exc}"
+                        )
+            else:
+                page_markdown = mk_blocks_to_markdown(paras_of_layout, make_mode, img_buket_path,
+                                                       page_idx=page_idx)
             output_content.extend(page_markdown)
         elif make_mode == MakeMode.CONTENT_LIST:
             para_blocks = (paras_of_layout or []) + (paras_of_discarded or [])
             if not para_blocks:
                 continue
             for para_block in para_blocks:
-                para_content = make_blocks_to_content_list(para_block, img_buket_path, page_idx)
+                try:
+                    para_content = make_blocks_to_content_list(para_block, img_buket_path, page_idx)
+                except Exception as exc:
+                    if not tolerant:
+                        raise
+                    logger.warning(
+                        f"Skipping DOCX content-list block on page {page_idx} "
+                        f"due to {type(exc).__name__}: {exc}"
+                    )
+                    continue
                 output_content.append(para_content)
         elif make_mode == MakeMode.CONTENT_LIST_V2:
             # https://github.com/drunkpig/llm-webkit-mirror/blob/dev6/docs/specification/output_format/content_list_spec.md
@@ -1031,7 +1059,16 @@ def union_make(pdf_info_dict: list,
             page_contents = []
             if para_blocks:
                 for para_block in para_blocks:
-                    para_content = make_blocks_to_content_list_v2(para_block, img_buket_path)
+                    try:
+                        para_content = make_blocks_to_content_list_v2(para_block, img_buket_path)
+                    except Exception as exc:
+                        if not tolerant:
+                            raise
+                        logger.warning(
+                            f"Skipping DOCX content-list-v2 block on page {page_idx} "
+                            f"due to {type(exc).__name__}: {exc}"
+                        )
+                        continue
                     page_contents.append(para_content)
             output_content.append(page_contents)
 

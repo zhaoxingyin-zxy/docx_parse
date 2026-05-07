@@ -10,12 +10,13 @@ from docx_parse.model.docx.main import convert_binary
 
 def office_docx_analyze(
         file_bytes,
-        image_writer=None
+        image_writer=None,
+        tolerant: bool = False,
 ):
     infer_start = time.time()
 
     file_stream = BytesIO(file_bytes)
-    results = convert_binary(file_stream)
+    results = convert_binary(file_stream, tolerant=tolerant)
 
     infer_time = round(time.time() - infer_start, 2)
     safe_time = max(infer_time, 0.01)
@@ -24,7 +25,11 @@ def office_docx_analyze(
     middle_json = result_to_middle_json(
         results,
         image_writer,
+        tolerant=tolerant,
     )
+    parse_errors = getattr(results, "parse_errors", None)
+    if tolerant and parse_errors:
+        middle_json["_parse_errors"] = list(parse_errors)
 
     return middle_json, results
 

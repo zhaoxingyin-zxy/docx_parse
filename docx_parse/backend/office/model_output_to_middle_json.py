@@ -123,10 +123,25 @@ def _link_index_entries_by_anchor(middle_json: dict) -> None:
                 text_block["anchor"] = anchor
 
 
-def result_to_middle_json(model_output_blocks_list, image_writer):
+def result_to_middle_json(model_output_blocks_list, image_writer, tolerant: bool = False):
     middle_json = {"pdf_info": [], "_backend":"office", "_version_name": __version__}
+    parse_errors = middle_json.setdefault("_parse_errors", []) if tolerant else None
     for index, page_blocks in enumerate(model_output_blocks_list):
-        page_info = blocks_to_page_info(page_blocks, image_writer, index)
+        try:
+            page_info = blocks_to_page_info(page_blocks, image_writer, index)
+        except Exception as exc:
+            if not tolerant:
+                raise
+            if parse_errors is not None and len(parse_errors) < 100:
+                parse_errors.append(
+                    {
+                        "stage": "middle_json_page",
+                        "page_idx": index,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+            continue
         middle_json["pdf_info"].append(page_info)
 
     section_counters: dict[int, int] = defaultdict(int)
@@ -168,5 +183,7 @@ def result_to_middle_json(model_output_blocks_list, image_writer):
                             section_counters[deeper] = 0
 
     _link_index_entries_by_anchor(middle_json)
+    if tolerant and not middle_json.get("_parse_errors"):
+        middle_json.pop("_parse_errors", None)
     return middle_json
 

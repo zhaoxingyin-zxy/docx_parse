@@ -4,15 +4,22 @@ from typing import BinaryIO
 from docx_parse.model.docx.docx_converter import DocxConverter
 
 
-def convert_path(file_path: str):
+class DocxPages(list):
+    """List of parsed DOCX pages with optional tolerant-mode errors."""
+
+
+def convert_path(file_path: str, tolerant: bool = False):
     with open(file_path, "rb") as fh:
-        return convert_binary(fh)
+        return convert_binary(fh, tolerant=tolerant)
 
 
-def convert_binary(file_binary: BinaryIO):
+def convert_binary(file_binary: BinaryIO, tolerant: bool = False):
     converter = DocxConverter()
-    converter.convert(file_binary)
-    return converter.pages
+    converter.convert(file_binary, tolerant=tolerant)
+    pages = DocxPages(converter.pages)
+    if tolerant and converter.parse_errors:
+        setattr(pages, "parse_errors", converter.parse_errors)
+    return pages
 
 
 if __name__ == "__main__":

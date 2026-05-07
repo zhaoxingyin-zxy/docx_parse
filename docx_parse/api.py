@@ -38,15 +38,19 @@ def _records_to_jsonl(records: list[dict]) -> str:
     return "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n"
 
 
-def convert_docx_to_model_output(file_bytes: bytes | bytearray | BinaryIO) -> list:
+def convert_docx_to_model_output(
+    file_bytes: bytes | bytearray | BinaryIO,
+    tolerant: bool = False,
+) -> list:
     """Convert DOCX bytes to the lightweight block model output."""
 
-    return convert_binary(BytesIO(_ensure_bytes(file_bytes)))
+    return convert_binary(BytesIO(_ensure_bytes(file_bytes)), tolerant=tolerant)
 
 
 def convert_docx_to_middle_json(
     file_bytes: bytes | bytearray | BinaryIO,
     image_output_dir: str | Path | None = None,
+    tolerant: bool = False,
 ) -> dict:
     """Convert DOCX bytes to MinerU-compatible middle JSON.
 
@@ -55,7 +59,11 @@ def convert_docx_to_middle_json(
     """
 
     writer = FileImageWriter(image_output_dir) if image_output_dir else None
-    middle_json, _ = office_docx_analyze(_ensure_bytes(file_bytes), image_writer=writer)
+    middle_json, _ = office_docx_analyze(
+        _ensure_bytes(file_bytes),
+        image_writer=writer,
+        tolerant=tolerant,
+    )
     return middle_json
 
 
@@ -64,17 +72,23 @@ def convert_docx_to_markdown(
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
     mode: str = MakeMode.MM_MD,
+    tolerant: bool = False,
 ) -> str:
     """Convert DOCX bytes to Markdown."""
 
-    middle_json = convert_docx_to_middle_json(file_bytes, image_output_dir)
-    return union_make(middle_json["pdf_info"], mode, image_dir_name)
+    middle_json = convert_docx_to_middle_json(
+        file_bytes,
+        image_output_dir,
+        tolerant=tolerant,
+    )
+    return union_make(middle_json["pdf_info"], mode, image_dir_name, tolerant=tolerant)
 
 
 def convert_docx_to_jsonl(
     file_bytes: bytes | bytearray | BinaryIO,
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
+    tolerant: bool = False,
 ) -> str:
     """Convert DOCX bytes to JSONL.
 
@@ -83,22 +97,36 @@ def convert_docx_to_jsonl(
     table_body, img_path, and page_idx depending on the parsed block type.
     """
 
-    middle_json = convert_docx_to_middle_json(file_bytes, image_output_dir)
-    records = union_make(middle_json["pdf_info"], MakeMode.CONTENT_LIST, image_dir_name)
+    middle_json = convert_docx_to_middle_json(
+        file_bytes,
+        image_output_dir,
+        tolerant=tolerant,
+    )
+    records = union_make(
+        middle_json["pdf_info"],
+        MakeMode.CONTENT_LIST,
+        image_dir_name,
+        tolerant=tolerant,
+    )
     return _records_to_jsonl(records)
 
 
-def convert_docx_file_to_model_output(path: str | Path) -> list:
+def convert_docx_file_to_model_output(path: str | Path, tolerant: bool = False) -> list:
     with open(path, "rb") as f:
-        return convert_docx_to_model_output(f)
+        return convert_docx_to_model_output(f, tolerant=tolerant)
 
 
 def convert_docx_file_to_middle_json(
     path: str | Path,
     image_output_dir: str | Path | None = None,
+    tolerant: bool = False,
 ) -> dict:
     with open(path, "rb") as f:
-        return convert_docx_to_middle_json(f, image_output_dir=image_output_dir)
+        return convert_docx_to_middle_json(
+            f,
+            image_output_dir=image_output_dir,
+            tolerant=tolerant,
+        )
 
 
 def convert_docx_file_to_markdown(
@@ -106,6 +134,7 @@ def convert_docx_file_to_markdown(
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
     mode: str = MakeMode.MM_MD,
+    tolerant: bool = False,
 ) -> str:
     with open(path, "rb") as f:
         return convert_docx_to_markdown(
@@ -113,6 +142,7 @@ def convert_docx_file_to_markdown(
             image_output_dir=image_output_dir,
             image_dir_name=image_dir_name,
             mode=mode,
+            tolerant=tolerant,
         )
 
 
@@ -120,10 +150,12 @@ def convert_docx_file_to_jsonl(
     path: str | Path,
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
+    tolerant: bool = False,
 ) -> str:
     with open(path, "rb") as f:
         return convert_docx_to_jsonl(
             f,
             image_output_dir=image_output_dir,
             image_dir_name=image_dir_name,
+            tolerant=tolerant,
         )

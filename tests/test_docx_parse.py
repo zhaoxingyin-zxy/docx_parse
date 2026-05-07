@@ -9,6 +9,9 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image, ImageDraw
 
+from docx_parse.backend.office.office_middle_json_mkcontent import union_make
+from docx_parse.model.docx.docx_converter import DocxConverter
+from docx_parse.utils.enum_class import MakeMode
 from docx_parse import (
     convert_docx_file_to_jsonl,
     convert_docx_file_to_markdown,
@@ -346,6 +349,63 @@ def test_fast_path_preserves_sdt_and_body_formula_text(tmp_path):
     assert "prefix controlled text" in joined
     assert "formula " in joined
     assert any("A=" in text for text in texts)
+
+
+def test_tolerant_mode_skips_failed_paragraph_and_records_error(tmp_path, monkeypatch):
+    docx_path = tmp_path / "tolerant_paragraph.docx"
+    doc = Document()
+    doc.add_paragraph("before")
+    doc.add_paragraph("bad paragraph")
+    doc.add_paragraph("after")
+    doc.save(docx_path)
+
+    original_handle_text_elements = DocxConverter._handle_text_elements
+
+    def fail_bad_paragraph(self, element):
+        paragraph = DocumentParagraph(element, self.docx_obj)
+        if paragraph.text == "bad paragraph":
+            raise RuntimeError("synthetic paragraph failure")
+        return original_handle_text_elements(self, element)
+
+    from docx.text.paragraph import Paragraph as DocumentParagraph
+
+    monkeypatch.setattr(DocxConverter, "_handle_text_elements", fail_bad_paragraph)
+
+    with pytest.raises(RuntimeError, match="synthetic paragraph failure"):
+        convert_docx_file_to_jsonl(docx_path)
+
+    middle_json = convert_docx_file_to_middle_json(docx_path, tolerant=True)
+    assert middle_json.get("_parse_errors")
+    assert middle_json["_parse_errors"][0]["stage"] == "paragraph"
+
+    jsonl = convert_docx_file_to_jsonl(docx_path, tolerant=True)
+    texts = [
+        record.get("text", "")
+        for record in (json.loads(line) for line in jsonl.splitlines())
+        if record.get("type") == "text"
+    ]
+    assert "before" in texts
+    assert "after" in texts
+    assert "bad paragraph" not in texts
+
+
+def test_tolerant_union_make_skips_malformed_content_block():
+    pdf_info = [
+        {
+            "page_idx": 0,
+            "para_blocks": [
+                {"type": "text", "lines": [{"spans": [{"type": "text", "content": "ok"}]}]},
+                {"type": "image", "blocks": "not-a-list"},
+            ],
+            "discarded_blocks": [],
+        }
+    ]
+
+    with pytest.raises(TypeError):
+        union_make(pdf_info, MakeMode.CONTENT_LIST)
+
+    records = union_make(pdf_info, MakeMode.CONTENT_LIST, tolerant=True)
+    assert records == [{"type": "text", "text": "ok", "page_idx": 0}]
 
 
 def _legacy_formula_text_parts(text: str) -> list[str]:
