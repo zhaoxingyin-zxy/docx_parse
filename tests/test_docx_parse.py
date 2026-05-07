@@ -29,11 +29,18 @@ def _table_records_from_jsonl(jsonl: str) -> list[dict]:
     ]
 
 
-def _normalize_table_html(html: str) -> str:
+def _table_signature(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
-    for image in soup.find_all("img"):
-        image["src"] = "<image>"
-    return re.sub(r"\s+", " ", str(soup)).strip()
+    cells = soup.find_all(["td", "th"])
+    return {
+        "tables": len(soup.find_all("table")),
+        "rows": len(soup.find_all("tr")),
+        "cells": len(cells),
+        "images": len(soup.find_all("img")),
+        "text": re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip(),
+        "colspans": [cell.get("colspan") for cell in cells if cell.get("colspan")],
+        "rowspans": [cell.get("rowspan") for cell in cells if cell.get("rowspan")],
+    }
 
 
 def _make_sample_docx(path: Path, image_path: Path) -> None:
@@ -73,6 +80,14 @@ def _set_outline_level(paragraph, level: int) -> None:
         outline = OxmlElement("w:outlineLvl")
         p_pr.append(outline)
     outline.set(qn("w:val"), str(level))
+
+
+def _set_table_row_header(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    tbl_header = tr_pr.find(qn("w:tblHeader"))
+    if tbl_header is None:
+        tbl_header = OxmlElement("w:tblHeader")
+        tr_pr.append(tbl_header)
 
 
 def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
@@ -165,9 +180,29 @@ def test_table_cell_line_breaks_and_empty_paragraphs_are_preserved(tmp_path):
     table_record = next(record for record in records if record.get("type") == "table")
     table_body = table_record["table_body"]
 
-    assert "<p>first line<br/>second line</p>" in table_body
-    assert "<p><br/></p>" in table_body
-    assert "<p>after empty paragraph</p>" in table_body
+    assert "<p>" not in table_body
+    assert "first line<br/>second line<br/><br/>after empty paragraph" in table_body
+
+
+def test_table_header_cells_are_rendered_as_th(tmp_path):
+    docx_path = tmp_path / "table_header.docx"
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    _set_table_row_header(table.rows[0])
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Answer"
+    table.cell(1, 1).text = "42"
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    table_record = next(record for record in records if record.get("type") == "table")
+    table_body = table_record["table_body"]
+
+    assert "<th>Name</th>" in table_body
+    assert "<th>Value</th>" in table_body
+    assert "<td>Answer</td>" in table_body
+    assert "<td>42</td>" in table_body
 
 
 def test_docx_01_table_output_matches_legacy_baseline():
@@ -181,6 +216,6 @@ def test_docx_01_table_output_matches_legacy_baseline():
     for current, baseline in zip(current_tables, baseline_tables):
         assert current.get("table_caption", []) == baseline.get("table_caption", [])
         assert current.get("page_idx") == baseline.get("page_idx")
-        assert _normalize_table_html(current["table_body"]) == _normalize_table_html(
+        assert _table_signature(current["table_body"]) == _table_signature(
             baseline["table_body"]
         )

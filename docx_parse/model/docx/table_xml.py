@@ -35,7 +35,12 @@ class DocxTableXmlRenderer:
         rows = [child for child in table_element if self._local_name(child) == "tr"]
         row_infos = self._build_row_infos(rows)
         rendered_rows = []
-        for row in row_infos:
+        for row_index, row in enumerate(row_infos):
+            cell_tag = (
+                "th"
+                if self._is_header_row(table_element, rows[row_index], row_index)
+                else "td"
+            )
             cells = []
             for cell in row:
                 if cell["skip"]:
@@ -47,7 +52,7 @@ class DocxTableXmlRenderer:
                     attrs.append(f'rowspan="{cell["rowspan"]}"')
                 attr_text = " " + " ".join(attrs) if attrs else ""
                 cells.append(
-                    f"<td{attr_text}>{self.render_cell(cell['element'])}</td>"
+                    f"<{cell_tag}{attr_text}>{self.render_cell(cell['element'])}</{cell_tag}>"
                 )
             rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
         return self._merge_adjacent_inline_tags(f"<table>{''.join(rendered_rows)}</table>")
@@ -96,14 +101,18 @@ class DocxTableXmlRenderer:
                 close_list()
                 paragraph_html = self.render_paragraph_inline(child)
                 if paragraph_html:
-                    parts.append(f"<p>{paragraph_html}</p>")
+                    if parts:
+                        parts.append("<br/>")
+                    parts.append(paragraph_html)
                 elif self._is_between_nonempty_paragraphs(
                     block_index,
                     nonempty_paragraph_indexes,
                 ):
-                    parts.append("<p><br/></p>")
+                    parts.append("<br/>")
             elif child_name == "tbl":
                 close_list()
+                if parts:
+                    parts.append("<br/>")
                 parts.append(self.render_table(child))
         close_list()
         return "".join(parts)
@@ -253,6 +262,17 @@ class DocxTableXmlRenderer:
         has_previous_text = any(index < block_index for index in nonempty_paragraph_indexes)
         has_next_text = any(index > block_index for index in nonempty_paragraph_indexes)
         return has_previous_text and has_next_text
+
+    def _is_header_row(self, table_element, row_element, row_index: int) -> bool:
+        if row_element.find(f"./{{{W_NS}}}trPr/{{{W_NS}}}tblHeader") is not None:
+            return True
+        if row_index != 0:
+            return False
+        tbl_look = table_element.find(f"./{{{W_NS}}}tblPr/{{{W_NS}}}tblLook")
+        if tbl_look is None:
+            return False
+        first_row = tbl_look.get(f"{{{W_NS}}}firstRow")
+        return first_row not in {None, "0", "false", "False"}
 
     def _build_row_infos(self, rows) -> list[list[dict]]:
         row_infos = []
