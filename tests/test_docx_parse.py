@@ -192,6 +192,7 @@ def test_table_cell_line_breaks_and_empty_paragraphs_are_preserved(tmp_path):
 
     assert "<p>" not in table_body
     assert "first line<br/>second line<br/><br/>after empty paragraph" in table_body
+    assert "after empty paragraph<br/></th>" in table_body
 
 
 def test_table_header_cells_are_rendered_as_th(tmp_path):
@@ -209,12 +210,12 @@ def test_table_header_cells_are_rendered_as_th(tmp_path):
     table_record = next(record for record in records if record.get("type") == "table")
     table_body = table_record["table_body"]
 
-    assert "<thead><tr><th>Name</th><th>Value</th></tr></thead>" in table_body
+    assert "<thead><tr><th>Name<br/></th><th>Value<br/></th></tr></thead>" in table_body
     assert "<tbody>" not in table_body
-    assert "<th>Name</th>" in table_body
-    assert "<th>Value</th>" in table_body
-    assert "<td>Answer</td>" in table_body
-    assert "<td>42</td>" in table_body
+    assert "<th>Name<br/></th>" in table_body
+    assert "<th>Value<br/></th>" in table_body
+    assert "<td>Answer<br/></td>" in table_body
+    assert "<td>42<br/></td>" in table_body
 
 
 def test_table_formula_plain_text_is_preserved_without_latex_conversion(tmp_path):
@@ -263,3 +264,7 @@ def test_docx_01_table_output_matches_legacy_baseline():
                 assert part in current_signature["text"]
         else:
             assert current_signature["text"] == baseline_signature["text"]
+    first_table = current_tables[0]["table_body"]
+    assert "This is a list:<br/><ul>" in first_table
+    assert "This is a formatted list:<br/><ul>" in first_table
+    assert "Third paragraph before a numbered list<br/><ol>" in first_table

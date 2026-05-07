@@ -79,6 +79,10 @@ class DocxTableXmlRenderer:
                 parts.append(f"</{open_list_type}>")
                 open_list_type = None
 
+        def append_break_if_needed() -> None:
+            if parts and not parts[-1].endswith("<br/>"):
+                parts.append("<br/>")
+
         block_index = -1
         for child in cell_element:
             child_name = self._local_name(child)
@@ -103,9 +107,8 @@ class DocxTableXmlRenderer:
                 close_list()
                 paragraph_html = self.render_paragraph_inline(child)
                 if paragraph_html:
-                    if parts:
-                        parts.append("<br/>")
                     parts.append(paragraph_html)
+                    parts.append("<br/>")
                 elif self._is_between_nonempty_paragraphs(
                     block_index,
                     nonempty_paragraph_indexes,
@@ -113,8 +116,7 @@ class DocxTableXmlRenderer:
                     parts.append("<br/>")
             elif child_name == "tbl":
                 close_list()
-                if parts:
-                    parts.append("<br/>")
+                append_break_if_needed()
                 parts.append(self.render_table(child))
         close_list()
         return "".join(parts)
