@@ -131,6 +131,12 @@ class DocxTableXmlRenderer:
                 parts.append(self._render_run(child, paragraph))
             elif child_name == "hyperlink":
                 parts.append(self._render_hyperlink(child, paragraph))
+            elif child_name == "oMath":
+                parts.append(self._render_equation_text(child))
+            elif child_name == "oMathPara":
+                for math_child in child:
+                    if self._local_name(math_child) == "oMath":
+                        parts.append(self._render_equation_text(math_child))
             elif (
                 child_name in self.converter._PARAGRAPH_TRANSPARENT_INLINE_CONTAINERS
                 or child_name in {"sdt", "ins", "moveTo", "fldSimple"}
@@ -155,6 +161,8 @@ class DocxTableXmlRenderer:
                 run_parts.append("<br/>")
             elif child_name in {"drawing", "pict"}:
                 run_parts.append(self._render_images_in_element(child))
+            elif child_name == "oMath":
+                run_parts.append(self._render_equation_text(child))
         content = "".join(run_parts)
         if not content:
             return ""
@@ -184,6 +192,14 @@ class DocxTableXmlRenderer:
         if not href:
             return content
         return f'<a href="{escape(href, quote=True)}">{content}</a>'
+
+    def _render_equation_text(self, math_element) -> str:
+        texts = [
+            node.text or ""
+            for node in math_element.iter()
+            if self._local_name(node) == "t" and node.text
+        ]
+        return escape("".join(texts), quote=False)
 
     def _render_images_in_element(self, element) -> str:
         html_parts = []

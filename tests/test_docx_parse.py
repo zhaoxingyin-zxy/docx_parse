@@ -32,13 +32,12 @@ def _table_records_from_jsonl(jsonl: str) -> list[dict]:
 def _table_signature(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     cells = soup.find_all(["td", "th"])
-    text = re.sub(r"\$[^$]*\$", "", soup.get_text(" ", strip=True))
     return {
         "tables": len(soup.find_all("table")),
         "rows": len(soup.find_all("tr")),
         "cells": len(cells),
         "images": len(soup.find_all("img")),
-        "text": re.sub(r"\s+", " ", text).strip(),
+        "text": re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip(),
         "colspans": [cell.get("colspan") for cell in cells if cell.get("colspan")],
         "rowspans": [cell.get("rowspan") for cell in cells if cell.get("rowspan")],
     }
@@ -89,6 +88,16 @@ def _set_table_row_header(row) -> None:
     if tbl_header is None:
         tbl_header = OxmlElement("w:tblHeader")
         tr_pr.append(tbl_header)
+
+
+def _append_simple_omml_text(paragraph, text: str) -> None:
+    o_math = OxmlElement("m:oMath")
+    math_run = OxmlElement("m:r")
+    math_text = OxmlElement("m:t")
+    math_text.text = text
+    math_run.append(math_text)
+    o_math.append(math_run)
+    paragraph._p.append(o_math)
 
 
 def test_docx_to_model_output_middle_json_markdown_and_jsonl(tmp_path):
@@ -208,6 +217,32 @@ def test_table_header_cells_are_rendered_as_th(tmp_path):
     assert "<td>42</td>" in table_body
 
 
+def test_table_formula_plain_text_is_preserved_without_latex_conversion(tmp_path):
+    docx_path = tmp_path / "table_formula_text.docx"
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    cell.text = ""
+    paragraph = cell.paragraphs[0]
+    paragraph.add_run("formula: ")
+    _append_simple_omml_text(paragraph, "A=πr²")
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    table_record = next(record for record in records if record.get("type") == "table")
+
+    assert "formula: A=πr²" in table_record["table_body"]
+    assert "<eq>" not in table_record["table_body"]
+
+
+def _legacy_formula_text_parts(text: str) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", part).strip()
+        for part in re.split(r"\$[^$]*\$", text)
+        if part.strip()
+    ]
+
+
 def test_docx_01_table_output_matches_legacy_baseline():
     if not DOCX_01_PATH.exists():
         pytest.skip(f"local regression DOCX is missing: {DOCX_01_PATH}")
@@ -219,6 +254,12 @@ def test_docx_01_table_output_matches_legacy_baseline():
     for current, baseline in zip(current_tables, baseline_tables):
         assert current.get("table_caption", []) == baseline.get("table_caption", [])
         assert current.get("page_idx") == baseline.get("page_idx")
-        assert _table_signature(current["table_body"]) == _table_signature(
-            baseline["table_body"]
-        )
+        current_signature = _table_signature(current["table_body"])
+        baseline_signature = _table_signature(baseline["table_body"])
+        for key in ["tables", "rows", "cells", "images", "colspans", "rowspans"]:
+            assert current_signature[key] == baseline_signature[key]
+        if "$" in baseline_signature["text"]:
+            for part in _legacy_formula_text_parts(baseline_signature["text"]):
+                assert part in current_signature["text"]
+        else:
+            assert current_signature["text"] == baseline_signature["text"]
