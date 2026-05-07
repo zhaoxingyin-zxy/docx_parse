@@ -40,7 +40,7 @@ def _records_to_jsonl(records: list[dict]) -> str:
 
 def convert_docx_to_model_output(
     file_bytes: bytes | bytearray | BinaryIO,
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> list:
     """Convert DOCX bytes to the lightweight block model output."""
 
@@ -50,7 +50,7 @@ def convert_docx_to_model_output(
 def convert_docx_to_middle_json(
     file_bytes: bytes | bytearray | BinaryIO,
     image_output_dir: str | Path | None = None,
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> dict:
     """Convert DOCX bytes to MinerU-compatible middle JSON.
 
@@ -72,7 +72,7 @@ def convert_docx_to_markdown(
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
     mode: str = MakeMode.MM_MD,
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> str:
     """Convert DOCX bytes to Markdown."""
 
@@ -88,7 +88,7 @@ def convert_docx_to_jsonl(
     file_bytes: bytes | bytearray | BinaryIO,
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> str:
     """Convert DOCX bytes to JSONL.
 
@@ -111,7 +111,7 @@ def convert_docx_to_jsonl(
     return _records_to_jsonl(records)
 
 
-def convert_docx_file_to_model_output(path: str | Path, tolerant: bool = False) -> list:
+def convert_docx_file_to_model_output(path: str | Path, tolerant: bool = True) -> list:
     with open(path, "rb") as f:
         return convert_docx_to_model_output(f, tolerant=tolerant)
 
@@ -119,7 +119,7 @@ def convert_docx_file_to_model_output(path: str | Path, tolerant: bool = False) 
 def convert_docx_file_to_middle_json(
     path: str | Path,
     image_output_dir: str | Path | None = None,
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> dict:
     with open(path, "rb") as f:
         return convert_docx_to_middle_json(
@@ -134,7 +134,7 @@ def convert_docx_file_to_markdown(
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
     mode: str = MakeMode.MM_MD,
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> str:
     with open(path, "rb") as f:
         return convert_docx_to_markdown(
@@ -150,7 +150,7 @@ def convert_docx_file_to_jsonl(
     path: str | Path,
     image_output_dir: str | Path | None = None,
     image_dir_name: str = "images",
-    tolerant: bool = False,
+    tolerant: bool = True,
 ) -> str:
     with open(path, "rb") as f:
         return convert_docx_to_jsonl(

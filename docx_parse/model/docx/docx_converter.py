@@ -620,7 +620,7 @@ class DocxConverter:
     def convert(
         self,
         file_stream: BinaryIO,
-        tolerant: bool = False,
+        tolerant: bool = True,
     ):
         # 重置所有实例状态，确保同一实例多次调用 convert() 时不会残留上次的数据
         self.pages = []

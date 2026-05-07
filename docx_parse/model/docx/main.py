@@ -8,12 +8,12 @@ class DocxPages(list):
     """List of parsed DOCX pages with optional tolerant-mode errors."""
 
 
-def convert_path(file_path: str, tolerant: bool = False):
+def convert_path(file_path: str, tolerant: bool = True):
     with open(file_path, "rb") as fh:
         return convert_binary(fh, tolerant=tolerant)
 
 
-def convert_binary(file_binary: BinaryIO, tolerant: bool = False):
+def convert_binary(file_binary: BinaryIO, tolerant: bool = True):
     converter = DocxConverter()
     converter.convert(file_binary, tolerant=tolerant)
     pages = DocxPages(converter.pages)

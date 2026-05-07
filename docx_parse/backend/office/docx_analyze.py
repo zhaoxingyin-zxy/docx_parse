@@ -11,7 +11,7 @@ from docx_parse.model.docx.main import convert_binary
 def office_docx_analyze(
         file_bytes,
         image_writer=None,
-        tolerant: bool = False,
+        tolerant: bool = True,
 ):
     infer_start = time.time()
 

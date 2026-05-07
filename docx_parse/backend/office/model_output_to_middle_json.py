@@ -123,7 +123,7 @@ def _link_index_entries_by_anchor(middle_json: dict) -> None:
                 text_block["anchor"] = anchor
 
 
-def result_to_middle_json(model_output_blocks_list, image_writer, tolerant: bool = False):
+def result_to_middle_json(model_output_blocks_list, image_writer, tolerant: bool = True):
     middle_json = {"pdf_info": [], "_backend":"office", "_version_name": __version__}
     parse_errors = middle_json.setdefault("_parse_errors", []) if tolerant else None
     for index, page_blocks in enumerate(model_output_blocks_list):

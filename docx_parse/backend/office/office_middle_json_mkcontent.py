@@ -1005,7 +1005,7 @@ def merge_para_with_text_v2(para_block):
 def union_make(pdf_info_dict: list,
                make_mode: str,
                img_buket_path: str = '',
-               tolerant: bool = False,
+               tolerant: bool = True,
                ):
 
     output_content = []

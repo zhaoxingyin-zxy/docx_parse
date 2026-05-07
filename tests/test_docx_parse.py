@@ -372,13 +372,13 @@ def test_tolerant_mode_skips_failed_paragraph_and_records_error(tmp_path, monkey
     monkeypatch.setattr(DocxConverter, "_handle_text_elements", fail_bad_paragraph)
 
     with pytest.raises(RuntimeError, match="synthetic paragraph failure"):
-        convert_docx_file_to_jsonl(docx_path)
+        convert_docx_file_to_jsonl(docx_path, tolerant=False)
 
-    middle_json = convert_docx_file_to_middle_json(docx_path, tolerant=True)
+    middle_json = convert_docx_file_to_middle_json(docx_path)
     assert middle_json.get("_parse_errors")
     assert middle_json["_parse_errors"][0]["stage"] == "paragraph"
 
-    jsonl = convert_docx_file_to_jsonl(docx_path, tolerant=True)
+    jsonl = convert_docx_file_to_jsonl(docx_path)
     texts = [
         record.get("text", "")
         for record in (json.loads(line) for line in jsonl.splitlines())
@@ -402,9 +402,9 @@ def test_tolerant_union_make_skips_malformed_content_block():
     ]
 
     with pytest.raises(TypeError):
-        union_make(pdf_info, MakeMode.CONTENT_LIST)
+        union_make(pdf_info, MakeMode.CONTENT_LIST, tolerant=False)
 
-    records = union_make(pdf_info, MakeMode.CONTENT_LIST, tolerant=True)
+    records = union_make(pdf_info, MakeMode.CONTENT_LIST)
     assert records == [{"type": "text", "text": "ok", "page_idx": 0}]
 
 
