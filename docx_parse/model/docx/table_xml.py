@@ -14,7 +14,6 @@ from docx_parse.backend.utils.office_image import (
     is_vector_image_part,
     serialize_office_image,
 )
-from docx_parse.model.docx.tools.math.omml import oMath2Latex
 from docx_parse.utils.docx_formatting import Script
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -132,12 +131,6 @@ class DocxTableXmlRenderer:
                 parts.append(self._render_run(child, paragraph))
             elif child_name == "hyperlink":
                 parts.append(self._render_hyperlink(child, paragraph))
-            elif child_name == "oMath":
-                parts.append(self._render_equation(child))
-            elif child_name == "oMathPara":
-                for math_child in child:
-                    if self._local_name(math_child) == "oMath":
-                        parts.append(self._render_equation(math_child))
             elif (
                 child_name in self.converter._PARAGRAPH_TRANSPARENT_INLINE_CONTAINERS
                 or child_name in {"sdt", "ins", "moveTo", "fldSimple"}
@@ -162,8 +155,6 @@ class DocxTableXmlRenderer:
                 run_parts.append("<br/>")
             elif child_name in {"drawing", "pict"}:
                 run_parts.append(self._render_images_in_element(child))
-            elif child_name == "oMath":
-                run_parts.append(self._render_equation(child))
         content = "".join(run_parts)
         if not content:
             return ""
@@ -193,16 +184,6 @@ class DocxTableXmlRenderer:
         if not href:
             return content
         return f'<a href="{escape(href, quote=True)}">{content}</a>'
-
-    def _render_equation(self, math_element) -> str:
-        try:
-            latex = str(oMath2Latex(math_element)).strip()
-        except Exception as exc:
-            logger.debug(f"Failed to convert table OMML equation to LaTeX: {exc}")
-            return ""
-        if not latex:
-            return ""
-        return f"<eq>{escape(latex, quote=False)}</eq>"
 
     def _render_images_in_element(self, element) -> str:
         html_parts = []

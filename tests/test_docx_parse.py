@@ -32,12 +32,13 @@ def _table_records_from_jsonl(jsonl: str) -> list[dict]:
 def _table_signature(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     cells = soup.find_all(["td", "th"])
+    text = re.sub(r"\$[^$]*\$", "", soup.get_text(" ", strip=True))
     return {
         "tables": len(soup.find_all("table")),
         "rows": len(soup.find_all("tr")),
         "cells": len(cells),
         "images": len(soup.find_all("img")),
-        "text": re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip(),
+        "text": re.sub(r"\s+", " ", text).strip(),
         "colspans": [cell.get("colspan") for cell in cells if cell.get("colspan")],
         "rowspans": [cell.get("rowspan") for cell in cells if cell.get("rowspan")],
     }

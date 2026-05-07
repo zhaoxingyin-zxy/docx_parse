@@ -82,9 +82,7 @@ CHR_BO = {
 
 T = {
     # Whitespace characters
-    " ": " ",   # NON-BREAKING SPACE (U+00A0) — pylatexenc maps this to "~" (text-mode),
-                   # which escape_latex would mangle to "\~" (invalid in math mode);
-                   # use a plain space instead.
+    " ": " ",   # NON-BREAKING SPACE (U+00A0); use a plain space in math mode.
     # Greek letters
     "\U0001d6fc": "\\alpha ",
     "\U0001d6fd": "\\beta ",
@@ -129,7 +127,7 @@ T = {
     "\u2197": "\\nearrow ",
     "\u2198": "\\searrow ",
     "\u2199": "\\swarrow ",
-    "\u2026": "\\ldots ",  # HORIZONTAL ELLIPSIS (…) — pylatexenc maps this to \textellipsis (text-mode), override to \ldots (math-mode)
+    "\u2026": "\\ldots ",  # HORIZONTAL ELLIPSIS (…) in math mode
     "\u22ee": "\\vdots ",
     "\u22ef": "\\cdots ",
     "\u22f0": "\\adots ",
@@ -152,14 +150,14 @@ T = {
     # Binary relations
     "\u00b1": "\\pm ",
     "\u2213": "\\mp ",
-    # Characters whose pylatexenc text-mode mappings are invalid in math environments
-    "\u00f0": "\\eth ",          # ð LATIN SMALL LETTER ETH — pylatexenc: \dh (tipa, not in KaTeX/MathJax)
-    "\u0131": "\\imath ",        # ı LATIN SMALL LETTER DOTLESS I — pylatexenc: \i (text-mode only)
-    "\u2127": "\\mho ",          # ℧ INVERTED OHM SIGN — pylatexenc: \textmho (textcomp, not in KaTeX/MathJax)
-    "\u212e": "e",               # ℮ ESTIMATED SIGN — pylatexenc: \textestimated (no math equivalent; use 'e')
-    "\u00c5": "\\mathring{A} ",  # Å LATIN CAPITAL LETTER A WITH RING — pylatexenc: \r{A} (text-mode only)
-    "\u2103": "\\text{°C}",       # ℃ DEGREE CELSIUS — pylatexenc: \textcelsius (textcomp, not in KaTeX/MathJax)
-    # Multiplication/division operators (text-mode pylatexenc mappings overridden to math-mode)
+    # Characters with explicit math-mode mappings.
+    "\u00f0": "\\eth ",
+    "\u0131": "\\imath ",
+    "\u2127": "\\mho ",
+    "\u212e": "e",
+    "\u00c5": "\\mathring{A} ",
+    "\u2103": "\\text{°C}",
+    # Multiplication/division operators.
     "\u00b7": "\\cdot ",   # MIDDLE DOT (·) — common in Chinese scientific notation
     "\u22c5": "\\cdot ",   # DOT OPERATOR (⋅)
     "\u2219": "\\bullet ", # BULLET OPERATOR (∙)
@@ -176,16 +174,14 @@ T = {
     "\u00b0": "\\circ ",   # DEGREE SIGN (°) — caller's context (e.g. 90°) provides the ^
     "\u2032": "'",         # PRIME (′)
     "\u2033": "''",        # DOUBLE PRIME (″)
-    # Superscript digits — avoid \texttwosuperior / \textthreesuperior from pylatexenc
+    # Superscript digits.
     "\u00b2": "2",
     "\u00b3": "3",
     "\u00b9": "1",
-    # Big operators as plain text characters — pylatexenc maps some to non-KaTeX commands
-    # (e.g. ∯→\surfintegral, ∰→\volintegral, ∱→\clwintegral) which don't render in KaTeX/MathJax.
-    # Override with standard KaTeX-compatible commands; if no KaTeX equivalent exists, keep Unicode.
-    "\u222f": "\\oiint ",          # ∯ SURFACE INTEGRAL — pylatexenc: \surfintegral (not in KaTeX)
-    "\u2230": "\\oiiint ",         # ∰ VOLUME INTEGRAL — pylatexenc: \volintegral (not in KaTeX)
-    "\u2231": "\u2231",            # ∱ CLOCKWISE INTEGRAL — pylatexenc: \clwintegral (not in KaTeX); keep Unicode
+    # Big operators. If no KaTeX equivalent exists, keep Unicode.
+    "\u222f": "\\oiint ",
+    "\u2230": "\\oiiint ",
+    "\u2231": "\u2231",
     "\u2232": "\u2232",            # ∲ CLOCKWISE CONTOUR INTEGRAL — no KaTeX equivalent; keep Unicode
     "\u2233": "\u2233",            # ∳ ANTICLOCKWISE CONTOUR INTEGRAL — no KaTeX equivalent; keep Unicode
     # N-ary operators: ⨀⨁⨂ have KaTeX commands; ⨃⨄ do not — keep Unicode for those
@@ -194,7 +190,7 @@ T = {
     "\u2a02": "\\bigotimes ",      # ⨂ N-ARY CIRCLED TIMES OPERATOR
     "\u2a03": "\u2a03",            # ⨃ N-ARY UNION WITH DOT — no exact KaTeX equivalent; keep Unicode
     "\u2a04": "\u2a04",            # ⨄ N-ARY UNION WITH PLUS — no exact KaTeX equivalent; keep Unicode
-    # Wave arrows — pylatexenc: \arrowwaveleft / \arrowwaveright (not in KaTeX); keep Unicode
+    # Wave arrows without common KaTeX commands; keep Unicode.
     "\u219c": "\u219c",            # ↜ LEFTWARDS WAVE ARROW
     "\u219d": "\u219d",            # ↝ RIGHTWARDS WAVE ARROW
     # Italic, Latin, uppercase

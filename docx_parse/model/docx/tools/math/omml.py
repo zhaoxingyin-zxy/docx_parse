@@ -9,7 +9,6 @@ import re
 
 import lxml.etree as ET
 from loguru import logger
-from pylatexenc.latexencode import UnicodeToLatexEncoder
 
 from .latex_dict import (
     ALN,
@@ -198,12 +197,6 @@ class oMath2Latex(Tag2Method):
     _t_dict = T
 
     __direct_tags = ("box", "sSub", "sSup", "sSubSup", "num", "den", "deg", "e")
-    u = UnicodeToLatexEncoder(
-        replacement_latex_protection="braces-all",
-        unknown_char_policy="keep",
-        unknown_char_warning=False,
-    )
-
     def __init__(self, element):
         self._latex = self.process_children(element)
 
@@ -390,9 +383,8 @@ class oMath2Latex(Tag2Method):
         if len(rows) == 1:
             row = rows[0]
             # Detect the OMML equation-tag pattern: the text element "#(n)" is
-            # stored verbatim inside the row; do_r converts "#" via pylatexenc
-            # to "\# " (escaped hash with surrounding spaces due to brace-
-            # protection stripping).  Match that at the end of the row,
+            # stored verbatim inside the row; do_r converts "#" to "\# ".
+            # Match that at the end of the row,
             # allowing optional whitespace between "\#" and the opening "(".
             tag_match = re.search(r'\\#\s*\(([^)]*)\)\s*$', row)
             if tag_match:
@@ -470,38 +462,14 @@ class oMath2Latex(Tag2Method):
         if s in CHARS:
             return BACKSLASH + s
 
-        # Check T dictionary first for known math-mode symbols.
-        # The T dictionary holds explicit math-mode LaTeX mappings and takes precedence
-        # over pylatexenc, which uses text-mode mappings by default and therefore produces
-        # text-mode commands like \textperiodcentered (for U+00B7 ·) that are invalid
-        # inside math environments.
+        # Prefer explicit math-mode mappings. Unknown characters are kept as-is
+        # so the converter does not depend on a third-party Unicode-to-LaTeX
+        # encoder.
         t_result = self._t_dict.get(s)
         if t_result is not None:
             return t_result
 
-        out_latex_str = self.u.unicode_to_latex(s)
-
-        # pylatexenc常把数学字符包成 {\ensuremath{...}}，这里只剥离外层包装，
-        # 不能删除内部LaTeX命令的闭合花括号。
-        if out_latex_str.startswith(r"{\ensuremath{") and out_latex_str.endswith("}}"):
-            out_latex_str = out_latex_str[len(r"{\ensuremath{") : -2]
-        elif out_latex_str.startswith(r"\ensuremath{") and out_latex_str.endswith("}"):
-            out_latex_str = out_latex_str[len(r"\ensuremath{") : -1]
-        elif (
-            s.startswith("{") is False
-            and out_latex_str.startswith("{")
-            and s.endswith("}") is False
-            and out_latex_str.endswith("}")
-        ):
-            out_latex_str = f" {out_latex_str[1:-1]} "
-
-        # Do NOT wrap remaining content in \text{}.
-        # Previously this code matched any string starting with "\text" and wrapped it
-        # again, producing invalid constructs like \text{ \textperiodcentered } for
-        # textcomp symbols.  Characters that truly need text mode should be mapped in
-        # the T dictionary above; for all others we keep the pylatexenc output as-is.
-
-        return out_latex_str
+        return s
 
 
     def do_r(self, elm):
