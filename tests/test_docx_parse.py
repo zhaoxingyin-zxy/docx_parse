@@ -147,6 +147,29 @@ def test_outline_level_9_is_treated_as_body_text(tmp_path):
     )
 
 
+def test_table_cell_line_breaks_and_empty_paragraphs_are_preserved(tmp_path):
+    docx_path = tmp_path / "table_breaks.docx"
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    cell.text = ""
+    first = cell.paragraphs[0]
+    first.add_run("first line")
+    first.add_run().add_break()
+    first.add_run("second line")
+    cell.add_paragraph("")
+    cell.add_paragraph("after empty paragraph")
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    table_record = next(record for record in records if record.get("type") == "table")
+    table_body = table_record["table_body"]
+
+    assert "<p>first line<br/>second line</p>" in table_body
+    assert "<p><br/></p>" in table_body
+    assert "<p>after empty paragraph</p>" in table_body
+
+
 def test_docx_01_table_output_matches_legacy_baseline():
     if not DOCX_01_PATH.exists():
         pytest.skip(f"local regression DOCX is missing: {DOCX_01_PATH}")

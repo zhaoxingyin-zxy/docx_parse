@@ -55,6 +55,16 @@ class DocxTableXmlRenderer:
     def render_cell(self, cell_element) -> str:
         parts = []
         open_list_type: str | None = None
+        block_children = [
+            child
+            for child in cell_element
+            if self._local_name(child) in {"p", "tbl"}
+        ]
+        nonempty_paragraph_indexes = {
+            index
+            for index, child in enumerate(block_children)
+            if self._local_name(child) == "p" and self.render_paragraph_inline(child)
+        }
 
         def close_list() -> None:
             nonlocal open_list_type
@@ -62,8 +72,11 @@ class DocxTableXmlRenderer:
                 parts.append(f"</{open_list_type}>")
                 open_list_type = None
 
+        block_index = -1
         for child in cell_element:
             child_name = self._local_name(child)
+            if child_name in {"p", "tbl"}:
+                block_index += 1
             if child_name == "p":
                 paragraph = Paragraph(child, self.converter.docx_obj)
                 numid, ilevel = self.converter._get_numId_and_ilvl(paragraph)
@@ -84,6 +97,11 @@ class DocxTableXmlRenderer:
                 paragraph_html = self.render_paragraph_inline(child)
                 if paragraph_html:
                     parts.append(f"<p>{paragraph_html}</p>")
+                elif self._is_between_nonempty_paragraphs(
+                    block_index,
+                    nonempty_paragraph_indexes,
+                ):
+                    parts.append("<p><br/></p>")
             elif child_name == "tbl":
                 close_list()
                 parts.append(self.render_table(child))
@@ -226,6 +244,15 @@ class DocxTableXmlRenderer:
             previous = html
             html = re.sub(r"</(strong|em|s)><\1>", "", html)
         return html
+
+    @staticmethod
+    def _is_between_nonempty_paragraphs(
+        block_index: int,
+        nonempty_paragraph_indexes: set[int],
+    ) -> bool:
+        has_previous_text = any(index < block_index for index in nonempty_paragraph_indexes)
+        has_next_text = any(index > block_index for index in nonempty_paragraph_indexes)
+        return has_previous_text and has_next_text
 
     def _build_row_infos(self, rows) -> list[list[dict]]:
         row_infos = []
