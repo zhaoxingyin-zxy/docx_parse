@@ -93,6 +93,20 @@ class DocxConverter:
         self._numbering_level_cache: dict[
             tuple[int, int], Optional[BaseOxmlElement]
         ] = {}
+        self._style_chain_cache: dict[Any, tuple[Any, ...]] = {}
+        self._paragraph_property_child_cache: dict[
+            tuple[Any, str], Optional[BaseOxmlElement]
+        ] = {}
+        self._paragraph_label_level_cache: dict[
+            Any, tuple[str, Optional[int]]
+        ] = {}
+        self._paragraph_num_cache: dict[
+            Any, tuple[Optional[int], Optional[int]]
+        ] = {}
+        self._paragraph_toc_level_cache: dict[Any, Optional[int]] = {}
+        self._paragraph_text_cache: dict[Any, str] = {}
+        self._document_numbering_possible_cache: Optional[bool] = None
+        self._header_footer_parts_cache: Optional[bool] = None
 
     @staticmethod
     def _escape_hyperlink_text(text: str) -> str:
@@ -578,6 +592,14 @@ class DocxConverter:
         self._numbering_root = None
         self._numbering_root_loaded = False
         self._numbering_level_cache = {}
+        self._style_chain_cache = {}
+        self._paragraph_property_child_cache = {}
+        self._paragraph_label_level_cache = {}
+        self._paragraph_num_cache = {}
+        self._paragraph_toc_level_cache = {}
+        self._paragraph_text_cache = {}
+        self._document_numbering_possible_cache = None
+        self._header_footer_parts_cache = None
         # 读取文件字节，先清理失效内部关系再交给 python-docx 解析。
         file_bytes = self._sanitize_missing_internal_relationships(file_stream.read())
         self.docx_obj = Document(BytesIO(file_bytes))
@@ -586,12 +608,13 @@ class DocxConverter:
         self.heading_list_numids = self._detect_heading_list_numids()
         self.pages.append(self.cur_page)
         self._walk_linear(self.docx_obj.element.body)
-        try:
-            self._add_header_footer(self.docx_obj)
-        except RecursionError as e:
-            logger.warning(f"Skipping DOCX header/footer parsing due to recursive section references: {e}")
-        except Exception as e:
-            logger.warning(f"Skipping DOCX header/footer parsing: {e}")
+        if self._has_header_footer_parts():
+            try:
+                self._add_header_footer(self.docx_obj)
+            except RecursionError as e:
+                logger.warning(f"Skipping DOCX header/footer parsing due to recursive section references: {e}")
+            except Exception as e:
+                logger.warning(f"Skipping DOCX header/footer parsing: {e}")
 
     def _reset_index_state(self) -> None:
         """重置目录索引栈，避免相隔的多个目录块被错误合并。"""
@@ -612,6 +635,84 @@ class DocxConverter:
             if anchor and anchor.startswith("_Toc"):
                 anchors.add(anchor)
         return anchors
+
+    def _has_header_footer_parts(self) -> bool:
+        """Return True only when the DOCX package contains header/footer parts."""
+        if self._header_footer_parts_cache is not None:
+            return self._header_footer_parts_cache
+
+        package = getattr(getattr(self.docx_obj, "part", None), "package", None)
+        parts = getattr(package, "parts", []) if package is not None else []
+        for part in parts:
+            part_name = str(getattr(part, "partname", "")).lower()
+            if "/header" in part_name or "/footer" in part_name:
+                self._header_footer_parts_cache = True
+                return True
+
+        self._header_footer_parts_cache = False
+        return False
+
+    def _document_may_have_numbered_paragraphs(self) -> bool:
+        """Cheaply detect whether body paragraphs can resolve to numbering."""
+        if self._document_numbering_possible_cache is not None:
+            return self._document_numbering_possible_cache
+
+        body = self.docx_obj.element.body
+        namespaces = DocxConverter._BLIP_NAMESPACES
+        if body.find(".//w:pPr/w:numPr", namespaces=namespaces) is not None:
+            self._document_numbering_possible_cache = True
+            return True
+
+        used_style_ids = {
+            p_style.get(self.XML_KEY)
+            for p_style in body.findall(".//w:pPr/w:pStyle", namespaces=namespaces)
+            if p_style.get(self.XML_KEY)
+        }
+        if not used_style_ids:
+            self._document_numbering_possible_cache = False
+            return False
+
+        styles_part = getattr(getattr(self.docx_obj, "part", None), "_styles_part", None)
+        styles_root = getattr(styles_part, "element", None)
+        if styles_root is None:
+            self._document_numbering_possible_cache = False
+            return False
+
+        style_id_attr = (
+            "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId"
+        )
+        style_elements = {}
+        style_based_on = {}
+        style_has_num_pr = {}
+        for style in styles_root.findall("w:style", namespaces=namespaces):
+            style_id = style.get(style_id_attr)
+            if not style_id:
+                continue
+            style_elements[style_id] = style
+            style_has_num_pr[style_id] = (
+                style.find(".//w:pPr/w:numPr", namespaces=namespaces) is not None
+            )
+            based_on = style.find("w:basedOn", namespaces=namespaces)
+            if based_on is not None:
+                based_on_id = based_on.get(self.XML_KEY)
+                if based_on_id:
+                    style_based_on[style_id] = based_on_id
+
+        def style_chain_has_num_pr(style_id: str) -> bool:
+            seen: set[str] = set()
+            current = style_id
+            while current and current not in seen:
+                seen.add(current)
+                if style_has_num_pr.get(current):
+                    return True
+                current = style_based_on.get(current)
+            return False
+
+        self._document_numbering_possible_cache = any(
+            style_id in style_elements and style_chain_has_num_pr(style_id)
+            for style_id in used_style_ids
+        )
+        return self._document_numbering_possible_cache
 
     def _walk_linear(
         self,
@@ -1144,6 +1245,54 @@ class DocxConverter:
             }
             self.cur_page.append(image_block)
 
+    def _get_plain_paragraph_text_fast(self, paragraph: Paragraph) -> Optional[str]:
+        """Return plain text for simple paragraphs that cannot affect output styling."""
+        paragraph_element = paragraph._element
+        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        allowed_run_property_tags = {
+            "color",
+            "lang",
+            "noProof",
+            "rFonts",
+            "sz",
+            "szCs",
+        }
+        text_parts = []
+        has_run = False
+
+        for child in paragraph_element:
+            child_name = etree.QName(child).localname
+            if child_name == "pPr":
+                if child.find(f"{{{w_ns}}}pStyle") is not None:
+                    return None
+                if child.find(f"{{{w_ns}}}numPr") is not None:
+                    return None
+                if child.find(f"{{{w_ns}}}outlineLvl") is not None:
+                    return None
+                continue
+            if child_name != "r":
+                return None
+
+            has_run = True
+            for run_child in child:
+                run_child_name = etree.QName(run_child).localname
+                if run_child_name == "rPr":
+                    for prop in run_child:
+                        if etree.QName(prop).localname not in allowed_run_property_tags:
+                            return None
+                elif run_child_name == "t":
+                    text_parts.append(run_child.text or "")
+                elif run_child_name == "tab":
+                    text_parts.append("\t")
+                elif run_child_name in {"br", "cr"}:
+                    text_parts.append("\n")
+                else:
+                    return None
+
+        if not has_run:
+            return ""
+        return "".join(text_parts)
+
     def _get_paragraph_elements(self, paragraph: Paragraph):
         """
         提取段落元素及其格式和超链接信息。
@@ -1155,6 +1304,11 @@ class DocxConverter:
             list[tuple[str, Optional[Formatting], Optional[Union[AnyUrl, Path, str]]]]:
             段落元素列表，每个元素包含文本、格式和超链接信息
         """
+
+        plain_text = self._get_plain_paragraph_text_fast(paragraph)
+        if plain_text is not None:
+            self._paragraph_text_cache[paragraph._element] = plain_text
+            return [(plain_text, None, None)]
 
         inner_contents = list(self._iter_paragraph_inner_content(paragraph))
         paragraph_text = self._get_paragraph_text_from_contents(inner_contents)
@@ -1362,9 +1516,16 @@ class DocxConverter:
 
     def _get_paragraph_text(self, paragraph: Paragraph) -> str:
         """Return paragraph plain text, including inline ``w:sdt`` content."""
-        return self._get_paragraph_text_from_contents(
+        cache_key = paragraph._element
+        cached = self._paragraph_text_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        text = self._get_paragraph_text_from_contents(
             list(self._iter_paragraph_inner_content(paragraph))
         )
+        self._paragraph_text_cache[cache_key] = text
+        return text
 
     @classmethod
     def _resolve_style_chain_bool(
@@ -1538,14 +1699,23 @@ class DocxConverter:
         Returns:
             tuple[str, Optional[int]]: (标签, 层级) 元组
         """
+        cache_key = paragraph._element
+        cached = self._paragraph_label_level_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if paragraph.style is None:
-            return "Normal", None
+            result = ("Normal", None)
+            self._paragraph_label_level_cache[cache_key] = result
+            return result
 
         label = paragraph.style.style_id
         name = paragraph.style.name
 
         if label is None:
-            return "Normal", None
+            result = ("Normal", None)
+            self._paragraph_label_level_cache[cache_key] = result
+            return result
 
         for style in self._iter_style_chain(paragraph.style):
             style_label = getattr(style, "style_id", None)
@@ -1554,29 +1724,54 @@ class DocxConverter:
             if style_label and ":" in style_label:
                 parts = style_label.split(":")
                 if len(parts) == 2:
-                    return parts[0], self._str_to_int(parts[1], None)
+                    result = (parts[0], self._str_to_int(parts[1], None))
+                    self._paragraph_label_level_cache[cache_key] = result
+                    return result
 
             for candidate in (style_label, style_name):
                 if candidate and "heading" in candidate.lower():
-                    return self._get_heading_and_level(candidate)
+                    result = self._get_heading_and_level(candidate)
+                    self._paragraph_label_level_cache[cache_key] = result
+                    return result
 
         outline_level = self._get_effective_outline_level(paragraph)
         if outline_level is not None:
-            return "Heading", outline_level + 1
+            result = ("Heading", outline_level + 1)
+            self._paragraph_label_level_cache[cache_key] = result
+            return result
 
-        return name or label or "Normal", None
+        result = (name or label or "Normal", None)
+        self._paragraph_label_level_cache[cache_key] = result
+        return result
 
     def _iter_style_chain(self, style: Any) -> Iterator[Any]:
         """Yield a style and its base-style chain once each."""
+        if style is None:
+            return
+
+        cache_key = getattr(style, "element", None)
+        if cache_key is None:
+            cache_key = (
+                getattr(style, "style_id", None),
+                getattr(style, "name", None),
+            )
+        cached = self._style_chain_cache.get(cache_key)
+        if cached is not None:
+            yield from cached
+            return
+
         seen: set[int] = set()
         current = style
+        chain = []
         while current is not None:
             current_id = id(current)
             if current_id in seen:
                 break
             seen.add(current_id)
-            yield current
+            chain.append(current)
             current = getattr(current, "base_style", None)
+        self._style_chain_cache[cache_key] = tuple(chain)
+        yield from chain
 
     def _get_paragraph_property_child(
         self, xml_element: Optional[BaseOxmlElement], child_tag: str
@@ -1585,11 +1780,18 @@ class DocxConverter:
         if xml_element is None:
             return None
 
+        cache_key = (xml_element, child_tag)
+        if cache_key in self._paragraph_property_child_cache:
+            return self._paragraph_property_child_cache[cache_key]
+
         namespaces = getattr(xml_element, "nsmap", None) or DocxConverter._BLIP_NAMESPACES
         pPr = xml_element.find("w:pPr", namespaces=namespaces)
         if pPr is None:
+            self._paragraph_property_child_cache[cache_key] = None
             return None
-        return pPr.find(child_tag, namespaces=namespaces)
+        child = pPr.find(child_tag, namespaces=namespaces)
+        self._paragraph_property_child_cache[cache_key] = child
+        return child
 
     def _get_effective_numPr(
         self, paragraph: Paragraph
@@ -1641,6 +1843,11 @@ class DocxConverter:
         Returns:
             tuple[Optional[int], Optional[int]]: (numId, ilvl) 元组
         """
+        cache_key = paragraph._element
+        cached = self._paragraph_num_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         numPr = self._get_effective_numPr(paragraph)
 
         if numPr is not None:
@@ -1651,7 +1858,9 @@ class DocxConverter:
             numId = numId_elem.get(self.XML_KEY) if numId_elem is not None else None
             ilvl = ilvl_elem.get(self.XML_KEY) if ilvl_elem is not None else None
 
-            return self._str_to_int(numId, None), self._str_to_int(ilvl, None)
+            result = (self._str_to_int(numId, None), self._str_to_int(ilvl, None))
+            self._paragraph_num_cache[cache_key] = result
+            return result
 
         return None, None  # 如果段落不是列表的一部分
 
@@ -1968,6 +2177,9 @@ class DocxConverter:
         Returns:
             set: 应当转换为标题块的列表numId集合
         """
+        if not self._document_may_have_numbered_paragraphs():
+            return set()
+
         heading_numids = set()
         # 收集文档元素序列：("list", numid, ilevel) 或 ("content",)
         items = []
@@ -2109,7 +2321,12 @@ class DocxConverter:
         Returns:
             Optional[int]: 层级（0-based），如果不是目录样式则返回 None
         """
+        cache_key = paragraph._element
+        if cache_key in self._paragraph_toc_level_cache:
+            return self._paragraph_toc_level_cache[cache_key]
+
         if paragraph.style is None:
+            self._paragraph_toc_level_cache[cache_key] = None
             return None
         style_name = paragraph.style.name
         if style_name:
