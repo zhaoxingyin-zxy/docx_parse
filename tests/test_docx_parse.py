@@ -32,12 +32,14 @@ def _table_records_from_jsonl(jsonl: str) -> list[dict]:
 def _table_signature(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     cells = soup.find_all(["td", "th"])
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+    text = re.sub(r"\s+([,.;:!?，。；：！？])", r"\1", text)
     return {
         "tables": len(soup.find_all("table")),
         "rows": len(soup.find_all("tr")),
         "cells": len(cells),
         "images": len(soup.find_all("img")),
-        "text": re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip(),
+        "text": text,
         "colspans": [cell.get("colspan") for cell in cells if cell.get("colspan")],
         "rowspans": [cell.get("rowspan") for cell in cells if cell.get("rowspan")],
     }
@@ -218,6 +220,22 @@ def test_table_header_cells_are_rendered_as_th(tmp_path):
     assert "<td>42<br/></td>" in table_body
 
 
+def test_empty_table_cell_paragraph_is_preserved_as_break(tmp_path):
+    docx_path = tmp_path / "empty_table_cell.docx"
+    doc = Document()
+    table = doc.add_table(rows=2, cols=1)
+    table.cell(0, 0).text = "Header"
+    table.cell(1, 0).text = ""
+    doc.save(docx_path)
+
+    records = [json.loads(line) for line in convert_docx_file_to_jsonl(docx_path).splitlines()]
+    table_record = next(record for record in records if record.get("type") == "table")
+    table_body = table_record["table_body"]
+
+    assert "<p>" not in table_body
+    assert "<td><br/></td>" in table_body
+
+
 def test_table_formula_plain_text_is_preserved_without_latex_conversion(tmp_path):
     docx_path = tmp_path / "table_formula_text.docx"
     doc = Document()
@@ -265,6 +283,8 @@ def test_docx_01_table_output_matches_legacy_baseline():
         else:
             assert current_signature["text"] == baseline_signature["text"]
     first_table = current_tables[0]["table_body"]
+    assert "<strong" not in first_table
+    assert "<em" not in first_table
     assert "This is a list:<br/><ul>" in first_table
     assert "This is a formatted list:<br/><ul>" in first_table
     assert "Third paragraph before a numbered list<br/><ol>" in first_table
