@@ -36,11 +36,8 @@ class DocxTableXmlRenderer:
         row_infos = self._build_row_infos(rows)
         rendered_rows = []
         for row_index, row in enumerate(row_infos):
-            cell_tag = (
-                "th"
-                if self._is_header_row(table_element, rows[row_index], row_index)
-                else "td"
-            )
+            is_header_row = self._is_header_row(table_element, rows[row_index], row_index)
+            cell_tag = "th" if is_header_row else "td"
             cells = []
             for cell in row:
                 if cell["skip"]:
@@ -54,8 +51,14 @@ class DocxTableXmlRenderer:
                 cells.append(
                     f"<{cell_tag}{attr_text}>{self.render_cell(cell['element'])}</{cell_tag}>"
                 )
-            rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
-        return self._merge_adjacent_inline_tags(f"<table>{''.join(rendered_rows)}</table>")
+            rendered_rows.append(
+                {
+                    "html": f"<tr>{''.join(cells)}</tr>",
+                    "is_header": is_header_row,
+                }
+            )
+        table_html = self._wrap_header_rows(rendered_rows)
+        return self._merge_adjacent_inline_tags(f"<table>{table_html}</table>")
 
     def render_cell(self, cell_element) -> str:
         parts = []
@@ -273,6 +276,23 @@ class DocxTableXmlRenderer:
             return False
         first_row = tbl_look.get(f"{{{W_NS}}}firstRow")
         return first_row not in {None, "0", "false", "False"}
+
+    @staticmethod
+    def _wrap_header_rows(rendered_rows: list[dict]) -> str:
+        if not rendered_rows or not rendered_rows[0]["is_header"]:
+            return "".join(row["html"] for row in rendered_rows)
+
+        header_rows = []
+        body_rows = []
+        in_header = True
+        for row in rendered_rows:
+            if in_header and row["is_header"]:
+                header_rows.append(row["html"])
+            else:
+                in_header = False
+                body_rows.append(row["html"])
+
+        return f"<thead>{''.join(header_rows)}</thead>{''.join(body_rows)}"
 
     def _build_row_infos(self, rows) -> list[list[dict]]:
         row_infos = []

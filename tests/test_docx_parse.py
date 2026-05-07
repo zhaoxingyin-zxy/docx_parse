@@ -199,6 +199,8 @@ def test_table_header_cells_are_rendered_as_th(tmp_path):
     table_record = next(record for record in records if record.get("type") == "table")
     table_body = table_record["table_body"]
 
+    assert "<thead><tr><th>Name</th><th>Value</th></tr></thead>" in table_body
+    assert "<tbody>" not in table_body
     assert "<th>Name</th>" in table_body
     assert "<th>Value</th>" in table_body
     assert "<td>Answer</td>" in table_body
