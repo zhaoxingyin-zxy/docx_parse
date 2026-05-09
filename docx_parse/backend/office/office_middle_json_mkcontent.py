@@ -33,6 +33,13 @@ OFFICE_STYLE_RENDER_MODE_MARKDOWN = 'markdown'
 OFFICE_MARKDOWN_WRAPPER_STYLES = {'bold', 'italic', 'strikethrough'}
 
 
+def _wrap_first_matching_style(content: str, style_set: set, style_wrappers: list) -> str:
+    for required_styles, left, right in style_wrappers:
+        if required_styles <= style_set:
+            return f'{left}{content}{right}'
+    return content
+
+
 def _apply_markdown_style(content: str, style: list) -> str:
     """
     按照字体样式列表对文本内容应用 Markdown 格式。
@@ -58,23 +65,25 @@ def _apply_markdown_style(content: str, style: list) -> str:
         return content
 
     # 第一层（最内层）：bold / italic —— 纯 Markdown 符号，放最里面兼容性最好
-    if 'bold' in style and 'italic' in style:
-        content = f'***{content}***'
-    elif 'bold' in style:
-        content = f'**{content}**'
-    elif 'italic' in style:
-        content = f'*{content}*'
+    style_set = set(style)
+    content = _wrap_first_matching_style(
+        content,
+        style_set,
+        [
+            ({'bold', 'italic'}, '***', '***'),
+            ({'bold'}, '**', '**'),
+            ({'italic'}, '*', '*'),
+        ],
+    )
 
     # 第二层：strikethrough —— ~~text~~，包裹纯 Markdown 内容，广泛支持
-    if 'strikethrough' in style:
-        content = f'~~{content}~~'
+    content = _wrap_first_matching_style(
+        content, style_set, [({'strikethrough'}, '~~', '~~')]
+    )
 
     # 第三层（最外层）：underline —— markdown 无原生语法，使用 HTML <u> 标签
     # 作为外层 HTML 容器，不会干扰内部 Markdown 标记的解析
-    if 'underline' in style:
-        content = f'<u>{content}</u>'
-
-    return content
+    return _wrap_first_matching_style(content, style_set, [({'underline'}, '<u>', '</u>')])
 
 
 def _apply_html_style(content: str, style: list) -> str:
@@ -82,20 +91,20 @@ def _apply_html_style(content: str, style: list) -> str:
     if not style or not content:
         return content
 
-    if 'bold' in style and 'italic' in style:
-        content = f'<strong><em>{content}</em></strong>'
-    elif 'bold' in style:
-        content = f'<strong>{content}</strong>'
-    elif 'italic' in style:
-        content = f'<em>{content}</em>'
-
-    if 'strikethrough' in style:
-        content = f'<del>{content}</del>'
-
-    if 'underline' in style:
-        content = f'<u>{content}</u>'
-
-    return content
+    style_set = set(style)
+    content = _wrap_first_matching_style(
+        content,
+        style_set,
+        [
+            ({'bold', 'italic'}, '<strong><em>', '</em></strong>'),
+            ({'bold'}, '<strong>', '</strong>'),
+            ({'italic'}, '<em>', '</em>'),
+        ],
+    )
+    content = _wrap_first_matching_style(
+        content, style_set, [({'strikethrough'}, '<del>', '</del>')]
+    )
+    return _wrap_first_matching_style(content, style_set, [({'underline'}, '<u>', '</u>')])
 
 
 def _get_office_style_render_mode() -> str:
@@ -226,34 +235,46 @@ def _is_boundary_text_char(ch: str) -> bool:
     return not _is_punctuation_or_symbol(ch)
 
 
-def _needs_markdown_it_boundary_space(prev_part: dict, next_part: dict) -> bool:
+def _boundary_space_mode_applies(prev_part: dict, next_part: dict) -> bool:
     if _get_office_style_render_mode() != OFFICE_STYLE_RENDER_MODE_MARKDOWN:
         return False
     if not prev_part.get('has_markdown_wrapper', False):
         return False
-    if next_part.get('span_type') in {
+    return next_part.get('span_type') not in {
         ContentType.HYPERLINK,
         ContentType.INLINE_EQUATION,
         ContentType.INTERLINE_EQUATION,
-    }:
-        return False
+    }
 
-    prev_raw = prev_part.get('raw_content', '')
-    next_raw = next_part.get('raw_content', '')
-    if not prev_raw.strip() or not next_raw.strip():
-        return False
-    if prev_raw[-1].isspace() or next_raw[0].isspace():
-        return False
 
-    prev_char = _get_last_non_whitespace_char(prev_raw)
-    next_char = _get_first_non_whitespace_char(next_raw)
-    if prev_char is None or next_char is None:
+def _raw_parts_allow_boundary_space(prev_raw: str, next_raw: str) -> bool:
+    if not prev_raw.strip():
+        return False
+    if not next_raw.strip():
+        return False
+    return not prev_raw[-1].isspace() and not next_raw[0].isspace()
+
+
+def _boundary_chars_need_space(prev_char, next_char) -> bool:
+    if prev_char is None:
+        return False
+    if next_char is None:
         return False
     if not _is_punctuation_or_symbol(prev_char):
         return False
-    if not _is_boundary_text_char(next_char):
+    return _is_boundary_text_char(next_char)
+
+
+def _needs_markdown_it_boundary_space(prev_part: dict, next_part: dict) -> bool:
+    if not _boundary_space_mode_applies(prev_part, next_part):
         return False
-    return True
+    prev_raw = prev_part.get('raw_content', '')
+    next_raw = next_part.get('raw_content', '')
+    if not _raw_parts_allow_boundary_space(prev_raw, next_raw):
+        return False
+    prev_char = _get_last_non_whitespace_char(prev_raw)
+    next_char = _get_first_non_whitespace_char(next_raw)
+    return _boundary_chars_need_space(prev_char, next_char)
 
 
 def _join_rendered_parts(parts: list[dict]) -> str:
@@ -346,9 +367,7 @@ def _append_hyperlink_part(
     )
 
 
-def merge_para_with_text(para_block, escape_text_block_prefix=True):
-    # First pass: collect rendered parts with raw boundary metadata.
-    parts = []
+def _append_title_number_part(parts: list[dict], para_block: dict) -> None:
     if para_block['type'] == BlockType.TITLE:
         if para_block.get('is_numbered_style', False):
             section_number = para_block.get('section_number', '')
@@ -361,42 +380,50 @@ def merge_para_with_text(para_block, escape_text_block_prefix=True):
                     )
                 )
 
+
+def _append_equation_part(parts: list[dict], span: dict, span_type: str) -> None:
+    if span_type == ContentType.INLINE_EQUATION:
+        content = f"{inline_left_delimiter}{span['content']}{inline_right_delimiter}"
+    else:
+        content = (
+            f"\n{display_left_delimiter}\n{span['content']}\n"
+            f"{display_right_delimiter}\n"
+        )
+    content = content.strip()
+    if content:
+        parts.append(
+            _make_rendered_part(
+                span_type,
+                content,
+                raw_content=span['content'],
+            )
+        )
+
+
+def _append_para_span_part(parts: list[dict], span: dict) -> None:
+    span_type = span['type']
+    span_style = span.get('style', [])
+    if span_type == ContentType.TEXT:
+        _append_text_part(parts, span['content'], span_style)
+    elif span_type in [ContentType.INLINE_EQUATION, ContentType.INTERLINE_EQUATION]:
+        _append_equation_part(parts, span, span_type)
+    elif span_type == ContentType.HYPERLINK:
+        _append_hyperlink_part(
+            parts,
+            span['content'],
+            span_style,
+            url=span.get('url', ''),
+        )
+
+
+def merge_para_with_text(para_block, escape_text_block_prefix=True):
+    # First pass: collect rendered parts with raw boundary metadata.
+    parts = []
+    _append_title_number_part(parts, para_block)
+
     for line in para_block['lines']:
         for span in line['spans']:
-            span_type = span['type']
-            span_style = span.get('style', [])
-
-            if span_type == ContentType.TEXT:
-                _append_text_part(parts, span['content'], span_style)
-            elif span_type == ContentType.INLINE_EQUATION:
-                content = f"{inline_left_delimiter}{span['content']}{inline_right_delimiter}"
-                content = content.strip()
-                if content:
-                    parts.append(
-                        _make_rendered_part(
-                            span_type,
-                            content,
-                            raw_content=span['content'],
-                        )
-                    )
-            elif span_type == ContentType.INTERLINE_EQUATION:
-                content = f"\n{display_left_delimiter}\n{span['content']}\n{display_right_delimiter}\n"
-                content = content.strip()
-                if content:
-                    parts.append(
-                        _make_rendered_part(
-                            span_type,
-                            content,
-                            raw_content=span['content'],
-                        )
-                    )
-            elif span_type == ContentType.HYPERLINK:
-                _append_hyperlink_part(
-                    parts,
-                    span['content'],
-                    span_style,
-                    url=span.get('url', ''),
-                )
+            _append_para_span_part(parts, span)
 
     para_text = _join_rendered_parts(parts)
     if escape_text_block_prefix and para_block.get('type') == BlockType.TEXT:
@@ -464,163 +491,130 @@ def merge_list_to_markdown(list_block):
     return '\n'.join(_flatten_list_items(list_block)) + '\n'
 
 
+def _looks_like_index_page_token(token: str) -> bool:
+    token = token.strip()
+    if not token or len(token) > 12:
+        return False
+    if re.search(r'[\u4e00-\u9fff]', token):
+        return False
+    return bool(
+        re.fullmatch(r'\d+', token)
+        or re.fullmatch(r'[ivxlcdm]+', token.lower())
+        or re.fullmatch(r'[a-zA-Z]', token)
+    )
+
+
+def _index_child_anchor(child: dict) -> str | None:
+    anchor = child.get('anchor')
+    if not isinstance(anchor, str) or not anchor.strip():
+        return None
+    return anchor.strip()
+
+
+def _index_child_span_items(child: dict) -> list[tuple[str, str, list]]:
+    span_items = []
+    for line in child.get('lines', []):
+        for span in line.get('spans', []):
+            span_items.append(
+                (span.get('content', ''), span.get('type'), span.get('style', []))
+            )
+    return span_items
+
+
+def _strip_index_page_tail(span_items: list[tuple[str, str, list]]) -> list[tuple[str, str, list]]:
+    last_tab_span_idx = -1
+    for i, (content, span_type, _) in enumerate(span_items):
+        if span_type != ContentType.INLINE_EQUATION and '\t' in content:
+            last_tab_span_idx = i
+    should_strip = False
+    if last_tab_span_idx != -1:
+        tab_tail = span_items[last_tab_span_idx][0].rsplit('\t', 1)[1]
+        should_strip = _looks_like_index_page_token(tab_tail)
+    stripped = []
+    for i, (content, span_type, span_style) in enumerate(span_items):
+        if span_type != ContentType.INLINE_EQUATION:
+            if i == last_tab_span_idx and should_strip:
+                content = content.rsplit('\t', 1)[0]
+            content = content.replace('\t', ' ')
+        stripped.append((content, span_type, span_style))
+    return stripped
+
+
+def _index_uniform_style(span_items: list[tuple[str, str, list]]) -> list | None:
+    non_eq_styles = [
+        tuple(span_style)
+        for content, span_type, span_style in span_items
+        if content and span_type != ContentType.INLINE_EQUATION
+    ]
+    if not non_eq_styles:
+        return None
+    first_style = non_eq_styles[0]
+    if first_style and all(s == first_style for s in non_eq_styles):
+        return list(first_style)
+    return None
+
+
+def _render_uniform_index_item(span_items: list[tuple[str, str, list]], style: list) -> str:
+    raw_parts = []
+    for content, span_type, _span_style in span_items:
+        if not content:
+            continue
+        if span_type == ContentType.INLINE_EQUATION:
+            raw_parts.append(f'{inline_left_delimiter}{content}{inline_right_delimiter}')
+        else:
+            raw_parts.append(_escape_office_markdown_text(content))
+    item_text = ''.join(raw_parts).strip()
+    return _apply_configured_style(item_text, style) if item_text else ''
+
+
+def _render_mixed_index_item(span_items: list[tuple[str, str, list]]) -> str:
+    rendered_parts = []
+    for content, span_type, span_style in span_items:
+        if not content:
+            continue
+        if span_type == ContentType.INLINE_EQUATION:
+            rendered_parts.append(
+                _make_rendered_part(
+                    span_type,
+                    f'{inline_left_delimiter}{content}{inline_right_delimiter}',
+                    raw_content=content,
+                )
+            )
+        elif span_type == ContentType.HYPERLINK:
+            _append_hyperlink_part(rendered_parts, content, span_style, plain_text_only=True)
+        else:
+            _append_text_part(rendered_parts, content, span_style)
+    return _join_rendered_parts(rendered_parts).strip()
+
+
+def _render_index_text_child(child: dict) -> str:
+    span_items = _index_child_span_items(child)
+    if not span_items:
+        return ''
+    stripped = _strip_index_page_tail(span_items)
+    uniform_style = _index_uniform_style(stripped)
+    if uniform_style:
+        return _render_uniform_index_item(stripped, uniform_style)
+    return _render_mixed_index_item(stripped)
+
+
 def _flatten_index_items(index_block):
-    """Recursively flatten index (TOC) blocks into markdown list items.
-
-    Strips the trailing tab+page-number from span content and, when target
-    location fields are present on the leaf text block, wraps the text in
-    a markdown hyperlink pointing to the body-block anchor.
-
-    Styling (bold, italic, underline, strikethrough) is applied via the
-    configured office style render mode. HYPERLINK spans are rendered as
-    plain styled text (without the URL) because TOC entries use
-    document-internal bookmark links, not external URLs.
-
-    The tab+page-number is stripped from the raw content BEFORE markdown
-    style markers are applied, so that closing markers (e.g. ``**``) are
-    never inadvertently removed by the tab-stripping step.
-    """
+    """Recursively flatten index (TOC) blocks into markdown list items."""
     items = []
-    ilevel = index_block.get('ilevel', 0)
-    indent = '    ' * ilevel
-
+    indent = '    ' * index_block.get('ilevel', 0)
     for child in index_block.get('blocks', []):
         if child.get('type') == BlockType.INDEX:
             items.extend(_flatten_index_items(child))
-        elif child.get('type') == BlockType.TEXT:
-            span_items = []   # list of (content, span_type, span_style)
-            anchor = child.get('anchor')
-            if not isinstance(anchor, str) or not anchor.strip():
-                anchor = None
-            else:
-                anchor = anchor.strip()
-
-            for line in child.get('lines', []):
-                for span in line.get('spans', []):
-                    content = span.get('content', '')
-                    span_style = span.get('style', [])
-                    span_type = span.get('type')
-                    span_items.append((content, span_type, span_style))
-
-            if not span_items:
-                continue
-
-            # ----------------------------------------------------------
-            # Step 1: Strip the trailing tab+page-number from the raw
-            # (unstyled) content BEFORE applying markdown markers.
-            #
-            # Find the last non-equation span that contains a tab; strip
-            # everything after its last tab ONLY when the trailing token
-            # actually looks like a page number.
-            # Then replace any remaining internal tabs with spaces so that
-            # "1.1\t研究对象" → "1.1 研究对象".
-            # ----------------------------------------------------------
-            def _looks_like_page_token(token: str) -> bool:
-                token = token.strip()
-                if not token:
-                    return False
-                # Page tokens are usually short and contain no CJK characters.
-                if len(token) > 12:
-                    return False
-                if re.search(r'[\u4e00-\u9fff]', token):
-                    return False
-                # Arabic / Roman / single-letter page styles.
-                if re.fullmatch(r'\d+', token):
-                    return True
-                if re.fullmatch(r'[ivxlcdm]+', token.lower()):
-                    return True
-                if re.fullmatch(r'[a-zA-Z]', token):
-                    return True
-                return False
-
-            last_tab_span_idx = -1
-            for i, (content, span_type, _) in enumerate(span_items):
-                if span_type != ContentType.INLINE_EQUATION and '\t' in content:
-                    last_tab_span_idx = i
-
-            should_strip_page_tail = False
-            if last_tab_span_idx != -1:
-                last_tab_content = span_items[last_tab_span_idx][0]
-                tab_tail = last_tab_content.rsplit('\t', 1)[1]
-                should_strip_page_tail = _looks_like_page_token(tab_tail)
-
-            # Build stripped span_items
-            stripped_span_items = []
-            for i, (content, span_type, span_style) in enumerate(span_items):
-                if span_type != ContentType.INLINE_EQUATION:
-                    if i == last_tab_span_idx and should_strip_page_tail:
-                        # Strip from last tab onwards (removes tab + page number)
-                        content = content.rsplit('\t', 1)[0]
-                    # Replace remaining internal tabs with spaces
-                    content = content.replace('\t', ' ')
-                stripped_span_items.append((content, span_type, span_style))
-
-            # ----------------------------------------------------------
-            # Step 2: Apply markdown styles and build the final text.
-            #
-            # If all non-equation spans share the same non-empty style
-            # (common in TOC entries like all-bold), apply style once to
-            # the whole item to avoid fragmented markers such as
-            # "**foo****bar**".
-            # ----------------------------------------------------------
-            non_eq_styles = [
-                tuple(span_style)
-                for content, span_type, span_style in stripped_span_items
-                if content and span_type != ContentType.INLINE_EQUATION
-            ]
-            uniform_style = None
-            if non_eq_styles:
-                first_style = non_eq_styles[0]
-                if first_style and all(s == first_style for s in non_eq_styles):
-                    uniform_style = list(first_style)
-
-            if uniform_style:
-                raw_parts = []
-                for content, span_type, _span_style in stripped_span_items:
-                    if not content:
-                        continue
-                    if span_type == ContentType.INLINE_EQUATION:
-                        raw_parts.append(
-                            f'{inline_left_delimiter}{content}{inline_right_delimiter}'
-                        )
-                    else:
-                        # For TOC rendering, hyperlink spans output as plain text.
-                        raw_parts.append(_escape_office_markdown_text(content))
-                item_text = ''.join(raw_parts).strip()
-                if item_text:
-                    item_text = _apply_configured_style(item_text, uniform_style)
-            else:
-                rendered_parts = []
-                for content, span_type, span_style in stripped_span_items:
-                    if not content:
-                        continue
-                    if span_type == ContentType.INLINE_EQUATION:
-                        rendered_parts.append(
-                            _make_rendered_part(
-                                span_type,
-                                f'{inline_left_delimiter}{content}{inline_right_delimiter}',
-                                raw_content=content,
-                            )
-                        )
-                    elif span_type == ContentType.HYPERLINK:
-                        _append_hyperlink_part(
-                            rendered_parts,
-                            content,
-                            span_style,
-                            plain_text_only=True,
-                        )
-                    else:
-                        _append_text_part(rendered_parts, content, span_style)
-
-                item_text = _join_rendered_parts(rendered_parts).strip()
-            if not item_text:
-                continue
-
-            if anchor is not None:
-                item_text = _render_link(item_text, f"#{anchor}")
-
-            items.append(f"{indent}- {item_text}")
-
+            continue
+        if child.get('type') != BlockType.TEXT:
+            continue
+        item_text = _render_index_text_child(child)
+        if not item_text:
+            continue
+        anchor = _index_child_anchor(child)
+        if anchor is not None:
+            item_text = _render_link(item_text, f"#{anchor}")
+        items.append(f"{indent}- {item_text}")
     return items
 
 
@@ -629,360 +623,384 @@ def merge_index_to_markdown(index_block):
     return '\n'.join(_flatten_index_items(index_block)) + '\n'
 
 
+def _markdown_text_block(para_block: dict) -> str:
+    para_text = merge_para_with_text(para_block)
+    if para_block.get('type') != BlockType.TEXT:
+        return para_text
+    bookmark_anchor = para_block.get("anchor")
+    if (
+        isinstance(bookmark_anchor, str)
+        and bookmark_anchor.strip()
+        and bookmark_anchor.strip().startswith("_Toc")
+    ):
+        return f'<a id="{bookmark_anchor.strip()}"></a>\n{para_text}'
+    return para_text
+
+
+def _markdown_title_block(para_block: dict) -> str:
+    title_level = get_title_level(para_block)
+    title_text = merge_para_with_text(para_block)
+    bookmark_anchor = para_block.get("anchor")
+    title = f'{"#" * title_level} {title_text}'
+    if isinstance(bookmark_anchor, str) and bookmark_anchor.strip():
+        return f'<a id="{bookmark_anchor.strip()}"></a>\n{title}'
+    return title
+
+
+def _markdown_image_block(para_block: dict, img_buket_path: str) -> str:
+    para_text = ''
+    for block in para_block['blocks']:
+        if block['type'] != BlockType.IMAGE_BODY:
+            continue
+        for line in block['lines']:
+            for span in line['spans']:
+                if span['type'] == ContentType.IMAGE and span.get('image_path', ''):
+                    para_text += f"![]({img_buket_path}/{span['image_path']})"
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.IMAGE_CAPTION:
+            para_text += '  \n' + merge_para_with_text(block)
+    return para_text
+
+
+def _markdown_table_block(para_block: dict, img_buket_path: str) -> str:
+    para_text = ''
+    for block in para_block['blocks']:
+        if block['type'] != BlockType.TABLE_BODY:
+            continue
+        for line in block['lines']:
+            for span in line['spans']:
+                if span['type'] == ContentType.TABLE:
+                    html = _format_embedded_html(span['html'], img_buket_path)
+                    para_text += f"\n{html}\n"
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.TABLE_CAPTION:
+            para_text += '  \n' + merge_para_with_text(block)
+    return para_text
+
+
+def _markdown_chart_block(para_block: dict, img_buket_path: str) -> str:
+    image_path, chart_content = get_body_data(para_block)
+    if chart_content:
+        para_text = f"\n{_format_embedded_html(chart_content, img_buket_path)}\n"
+    elif image_path:
+        para_text = f"![]({_build_media_path(img_buket_path, image_path)})"
+    else:
+        return ''
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.CHART_CAPTION:
+            para_text += '  \n' + merge_para_with_text(block)
+    return para_text
+
+
+def _markdown_para_block(para_block: dict, make_mode: str, img_buket_path: str) -> str:
+    para_type = para_block['type']
+    if para_type in [BlockType.TEXT, BlockType.INTERLINE_EQUATION]:
+        return _markdown_text_block(para_block)
+    if para_type == BlockType.LIST:
+        return merge_list_to_markdown(para_block)
+    if para_type == BlockType.INDEX:
+        return merge_index_to_markdown(para_block)
+    if para_type == BlockType.TITLE:
+        return _markdown_title_block(para_block)
+    if make_mode == MakeMode.NLP_MD:
+        return ''
+    if para_type == BlockType.IMAGE:
+        return _markdown_image_block(para_block, img_buket_path)
+    if para_type == BlockType.TABLE:
+        return _markdown_table_block(para_block, img_buket_path)
+    if para_type == BlockType.CHART:
+        return _markdown_chart_block(para_block, img_buket_path)
+    return ''
+
+
 def mk_blocks_to_markdown(para_blocks, make_mode, img_buket_path='', page_idx=None):
     page_markdown = []
     for para_block in para_blocks:
-        para_text = ''
-        para_type = para_block['type']
-        if para_type in [BlockType.TEXT, BlockType.INTERLINE_EQUATION]:
-            para_text = merge_para_with_text(para_block)
-            if para_type == BlockType.TEXT:
-                bookmark_anchor = para_block.get("anchor")
-                if (
-                    isinstance(bookmark_anchor, str)
-                    and bookmark_anchor.strip()
-                    and bookmark_anchor.strip().startswith("_Toc")
-                ):
-                    para_text = f'<a id="{bookmark_anchor.strip()}"></a>\n{para_text}'
-        elif para_type == BlockType.LIST:
-            para_text = merge_list_to_markdown(para_block)
-        elif para_type == BlockType.INDEX:
-            para_text = merge_index_to_markdown(para_block)
-        elif para_type == BlockType.TITLE:
-            title_level = get_title_level(para_block)
-            title_text = merge_para_with_text(para_block)
-            bookmark_anchor = para_block.get("anchor")
-            if isinstance(bookmark_anchor, str) and bookmark_anchor.strip():
-                para_text = f'<a id="{bookmark_anchor.strip()}"></a>\n{"#" * title_level} {title_text}'
-            else:
-                para_text = f'{"#" * title_level} {title_text}'
-        elif para_type == BlockType.IMAGE:
-            if make_mode == MakeMode.NLP_MD:
-                continue
-            elif make_mode == MakeMode.MM_MD:
-                for block in para_block['blocks']:  # 1st.拼image_body
-                    if block['type'] == BlockType.IMAGE_BODY:
-                        for line in block['lines']:
-                            for span in line['spans']:
-                                if span['type'] == ContentType.IMAGE:
-                                    if span.get('image_path', ''):
-                                        para_text += f"![]({img_buket_path}/{span['image_path']})"
-                for block in para_block['blocks']:  # 2nd.拼image_caption
-                    if block['type'] == BlockType.IMAGE_CAPTION:
-                        para_text += '  \n' + merge_para_with_text(block)
-
-        elif para_type == BlockType.TABLE:
-            if make_mode == MakeMode.NLP_MD:
-                continue
-            elif make_mode == MakeMode.MM_MD:
-                for block in para_block['blocks']:  # 1st.拼table_body
-                    if block['type'] == BlockType.TABLE_BODY:
-                        for line in block['lines']:
-                            for span in line['spans']:
-                                if span['type'] == ContentType.TABLE:
-                                    para_text += f"\n{_format_embedded_html(span['html'], img_buket_path)}\n"
-                for block in para_block['blocks']:  # 2nd.拼table_caption
-                    if block['type'] == BlockType.TABLE_CAPTION:
-                        para_text += '  \n' + merge_para_with_text(block)
-        elif para_type == BlockType.CHART:
-            if make_mode == MakeMode.NLP_MD:
-                continue
-            elif make_mode == MakeMode.MM_MD:
-                image_path, chart_content = get_body_data(para_block)
-                if chart_content:
-                    para_text += f"\n{_format_embedded_html(chart_content, img_buket_path)}\n"
-                elif image_path:
-                    para_text += f"![]({_build_media_path(img_buket_path, image_path)})"
-                else:
-                    continue
-                for block in para_block['blocks']:
-                    if block['type'] == BlockType.CHART_CAPTION:
-                        para_text += '  \n' + merge_para_with_text(block)
-        if para_text.strip() == '':
-            continue
-        else:
-            # page_markdown.append(para_text.strip())
+        para_text = _markdown_para_block(para_block, make_mode, img_buket_path)
+        if para_text.strip():
             page_markdown.append(para_text.strip('\r\n'))
-
     return page_markdown
+
+
+def _content_list_text_like(para_block: dict, para_type: str) -> dict:
+    return {
+        'type': para_type,
+        'text': merge_para_with_text(para_block),
+    }
+
+
+def _content_list_title(para_block: dict) -> dict:
+    title_level = get_title_level(para_block)
+    para_content = {
+        'type': ContentType.TEXT,
+        'text': merge_para_with_text(para_block),
+    }
+    if title_level != 0:
+        para_content['text_level'] = title_level
+    return para_content
+
+
+def _content_list_equation(para_block: dict) -> dict:
+    return {
+        'type': ContentType.EQUATION,
+        'text': merge_para_with_text(para_block),
+        'text_format': 'latex',
+    }
+
+
+def _content_list_image(para_block: dict, img_buket_path: str) -> dict:
+    para_content = {'type': ContentType.IMAGE, 'img_path': '', BlockType.IMAGE_CAPTION: []}
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.IMAGE_BODY:
+            for line in block['lines']:
+                for span in line['spans']:
+                    if span['type'] == ContentType.IMAGE and span.get('image_path', ''):
+                        para_content['img_path'] = f"{img_buket_path}/{span['image_path']}"
+        if block['type'] == BlockType.IMAGE_CAPTION:
+            para_content[BlockType.IMAGE_CAPTION].append(merge_para_with_text(block))
+    return para_content
+
+
+def _content_list_table(para_block: dict, img_buket_path: str) -> dict:
+    para_content = {'type': ContentType.TABLE, BlockType.TABLE_CAPTION: []}
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.TABLE_BODY:
+            for line in block['lines']:
+                for span in line['spans']:
+                    if span['type'] == ContentType.TABLE and span.get('html', ''):
+                        para_content[BlockType.TABLE_BODY] = _format_embedded_html(
+                            span['html'], img_buket_path
+                        )
+        if block['type'] == BlockType.TABLE_CAPTION:
+            para_content[BlockType.TABLE_CAPTION].append(merge_para_with_text(block))
+    return para_content
+
+
+def _content_list_chart(para_block: dict, img_buket_path: str) -> dict:
+    para_content = {
+        'type': ContentType.CHART,
+        'img_path': '',
+        'content': '',
+        BlockType.CHART_CAPTION: [],
+    }
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.CHART_BODY:
+            for line in block['lines']:
+                for span in line['spans']:
+                    if span['type'] == ContentType.CHART:
+                        para_content['img_path'] = _build_media_path(
+                            img_buket_path, span.get('image_path', '')
+                        )
+                        if span.get('content', ''):
+                            para_content['content'] = _format_embedded_html(
+                                span['content'], img_buket_path
+                            )
+        if block['type'] == BlockType.CHART_CAPTION:
+            para_content[BlockType.CHART_CAPTION].append(merge_para_with_text(block))
+    return para_content
 
 
 def make_blocks_to_content_list(para_block, img_buket_path, page_idx):
     para_type = para_block['type']
-    para_content = {}
-    if para_type in [
-        BlockType.TEXT,
-        BlockType.HEADER,
-        BlockType.FOOTER,
-        BlockType.PAGE_FOOTNOTE,
-    ]:
-        para_content = {
-            'type': para_type,
-            'text': merge_para_with_text(para_block),
-        }
-    elif para_type == BlockType.LIST:
-        attribute = para_block.get('attribute', 'unordered')
-        para_content = {
-            'type': para_type,
-            'list_items': _flatten_list_items(para_block),
-        }
-    elif para_type == BlockType.INDEX:
-        para_content = {
-            'type': para_type,
-            'list_items': _flatten_index_items(para_block),
-        }
-    elif para_type == BlockType.TITLE:
-        title_level = get_title_level(para_block)
-        para_content = {
-            'type': ContentType.TEXT,
-            'text': merge_para_with_text(para_block),
-        }
-        if title_level != 0:
-            para_content['text_level'] = title_level
-    elif para_type == BlockType.INTERLINE_EQUATION:
-        para_content = {
-            'type': ContentType.EQUATION,
-            'text': merge_para_with_text(para_block),
-            'text_format': 'latex',
-        }
-    elif para_type == BlockType.IMAGE:
-        para_content = {'type': ContentType.IMAGE, 'img_path': '', BlockType.IMAGE_CAPTION: []}
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.IMAGE_BODY:
-                for line in block['lines']:
-                    for span in line['spans']:
-                        if span['type'] == ContentType.IMAGE:
-                            if span.get('image_path', ''):
-                                para_content['img_path'] = f"{img_buket_path}/{span['image_path']}"
-            if block['type'] == BlockType.IMAGE_CAPTION:
-                para_content[BlockType.IMAGE_CAPTION].append(merge_para_with_text(block))
-    elif para_type == BlockType.TABLE:
-        para_content = {'type': ContentType.TABLE, BlockType.TABLE_CAPTION: []}
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.TABLE_BODY:
-                for line in block['lines']:
-                    for span in line['spans']:
-                        if span['type'] == ContentType.TABLE:
-                            if span.get('html', ''):
-                                para_content[BlockType.TABLE_BODY] = _format_embedded_html(span['html'], img_buket_path)
-            if block['type'] == BlockType.TABLE_CAPTION:
-                para_content[BlockType.TABLE_CAPTION].append(merge_para_with_text(block))
-    elif para_type == BlockType.CHART:
-        para_content = {
-            'type': ContentType.CHART,
-            'img_path': '',
-            'content': '',
-            BlockType.CHART_CAPTION: [],
-        }
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.CHART_BODY:
-                for line in block['lines']:
-                    for span in line['spans']:
-                        if span['type'] == ContentType.CHART:
-                            para_content['img_path'] = _build_media_path(
-                                img_buket_path,
-                                span.get('image_path', ''),
-                            )
-                            if span.get('content', ''):
-                                para_content['content'] = _format_embedded_html(
-                                    span['content'],
-                                    img_buket_path,
-                                )
-            if block['type'] == BlockType.CHART_CAPTION:
-                para_content[BlockType.CHART_CAPTION].append(merge_para_with_text(block))
-
+    builders = {
+        BlockType.LIST: lambda: {'type': para_type, 'list_items': _flatten_list_items(para_block)},
+        BlockType.INDEX: lambda: {'type': para_type, 'list_items': _flatten_index_items(para_block)},
+        BlockType.TITLE: lambda: _content_list_title(para_block),
+        BlockType.INTERLINE_EQUATION: lambda: _content_list_equation(para_block),
+        BlockType.IMAGE: lambda: _content_list_image(para_block, img_buket_path),
+        BlockType.TABLE: lambda: _content_list_table(para_block, img_buket_path),
+        BlockType.CHART: lambda: _content_list_chart(para_block, img_buket_path),
+    }
+    text_like_types = [BlockType.TEXT, BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_FOOTNOTE]
+    para_content = _content_list_text_like(para_block, para_type) if para_type in text_like_types else builders.get(para_type, dict)()
     para_content['page_idx'] = page_idx
     anchor = para_block.get("anchor")
     if isinstance(anchor, str) and anchor.strip():
         para_content["anchor"] = anchor.strip()
-
     return para_content
+
+
+def _v2_header_footer_content(para_block: dict, para_type: str) -> dict:
+    content_type_map = {
+        BlockType.HEADER: ContentTypeV2.PAGE_HEADER,
+        BlockType.FOOTER: ContentTypeV2.PAGE_FOOTER,
+        BlockType.PAGE_FOOTNOTE: ContentTypeV2.PAGE_FOOTNOTE,
+    }
+    content_type = content_type_map[para_type]
+    return {
+        'type': content_type,
+        'content': {f"{content_type}_content": merge_para_with_text_v2(para_block)},
+    }
+
+
+def _v2_title_content(para_block: dict) -> dict:
+    title_level = get_title_level(para_block)
+    if title_level != 0:
+        return {
+            'type': ContentTypeV2.TITLE,
+            'content': {
+                "title_content": merge_para_with_text_v2(para_block),
+                "level": title_level,
+            },
+        }
+    return {
+        'type': ContentTypeV2.PARAGRAPH,
+        'content': {"paragraph_content": merge_para_with_text_v2(para_block)},
+    }
+
+
+def _v2_image_content(para_block: dict, img_buket_path: str) -> dict:
+    image_caption = []
+    image_path, _ = get_body_data(para_block)
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.IMAGE_CAPTION:
+            image_caption.extend(merge_para_with_text_v2(block))
+    return {
+        'type': ContentTypeV2.IMAGE,
+        'content': {
+            'image_source': {'path': f"{img_buket_path}/{image_path}"},
+            'image_caption': image_caption,
+        },
+    }
+
+
+def _v2_table_type(html: str) -> tuple[str, int]:
+    table_nest_level = 2 if html.count("<table") > 1 else 1
+    if "colspan" in html or "rowspan" in html or table_nest_level > 1:
+        return ContentTypeV2.TABLE_COMPLEX, table_nest_level
+    return ContentTypeV2.TABLE_SIMPLE, table_nest_level
+
+
+def _v2_table_content(para_block: dict, img_buket_path: str) -> dict:
+    table_caption = []
+    _, html = get_body_data(para_block)
+    table_type, table_nest_level = _v2_table_type(html)
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.TABLE_CAPTION:
+            table_caption.extend(merge_para_with_text_v2(block))
+    return {
+        'type': ContentTypeV2.TABLE,
+        'content': {
+            'table_caption': table_caption,
+            'html': _format_embedded_html(html, img_buket_path),
+            'table_type': table_type,
+            'table_nest_level': table_nest_level,
+        },
+    }
+
+
+def _v2_chart_content(para_block: dict, img_buket_path: str) -> dict:
+    chart_caption = []
+    image_path, chart_content = get_body_data(para_block)
+    for block in para_block['blocks']:
+        if block['type'] == BlockType.CHART_CAPTION:
+            chart_caption.extend(merge_para_with_text_v2(block))
+    return {
+        'type': ContentTypeV2.CHART,
+        'content': {
+            'image_source': {'path': _build_media_path(img_buket_path, image_path)},
+            'content': _format_embedded_html(chart_content, img_buket_path),
+            'chart_caption': chart_caption,
+        },
+    }
+
+
+def _v2_list_content(para_block: dict) -> dict:
+    return {
+        'type': ContentTypeV2.LIST,
+        'content': {
+            'list_type': ContentTypeV2.LIST_TEXT,
+            'attribute': para_block.get('attribute', 'unordered'),
+            'list_items': _flatten_list_items_v2(para_block),
+        },
+    }
+
+
+def _v2_paragraph_content(para_block: dict) -> dict:
+    return {
+        'type': ContentTypeV2.PARAGRAPH,
+        'content': {'paragraph_content': merge_para_with_text_v2(para_block)},
+    }
+
+
+def _v2_equation_content(para_block: dict) -> dict:
+    _, math_content = get_body_data(para_block)
+    return {
+        'type': ContentTypeV2.EQUATION_INTERLINE,
+        'content': {'math_content': math_content, 'math_type': 'latex'},
+    }
+
+
+def _v2_index_content(para_block: dict) -> dict:
+    return {
+        'type': ContentTypeV2.INDEX,
+        'content': {
+            'list_type': ContentTypeV2.LIST_TEXT,
+            'list_items': _flatten_list_items_v2(para_block),
+        },
+    }
 
 
 def make_blocks_to_content_list_v2(para_block, img_buket_path):
     para_type = para_block['type']
-    para_content = {}
-    if para_type in [
-        BlockType.HEADER,
-        BlockType.FOOTER,
-        BlockType.PAGE_FOOTNOTE,
-    ]:
-        if para_type == BlockType.HEADER:
-            content_type = ContentTypeV2.PAGE_HEADER
-        elif para_type == BlockType.FOOTER:
-            content_type = ContentTypeV2.PAGE_FOOTER
-        elif para_type == BlockType.PAGE_FOOTNOTE:
-            content_type = ContentTypeV2.PAGE_FOOTNOTE
-        else:
-            raise ValueError(f"Unknown para_type: {para_type}")
-        para_content = {
-            'type': content_type,
-            'content': {
-                f"{content_type}_content": merge_para_with_text_v2(para_block),
-            }
-        }
-    elif para_type == BlockType.TITLE:
-        title_level = get_title_level(para_block)
-        if title_level != 0:
-            para_content = {
-                'type': ContentTypeV2.TITLE,
-                'content': {
-                    "title_content": merge_para_with_text_v2(para_block),
-                    "level": title_level
-                }
-            }
-        else:
-            para_content = {
-                'type': ContentTypeV2.PARAGRAPH,
-                'content': {
-                    "paragraph_content": merge_para_with_text_v2(para_block),
-                }
-            }
-    elif para_type in [
-        BlockType.TEXT,
-    ]:
-        para_content = {
-            'type': ContentTypeV2.PARAGRAPH,
-            'content': {
-                'paragraph_content': merge_para_with_text_v2(para_block),
-            }
-        }
-    elif para_type == BlockType.INTERLINE_EQUATION:
-        _, math_content = get_body_data(para_block)
-        para_content = {
-            'type': ContentTypeV2.EQUATION_INTERLINE,
-            'content': {
-                'math_content': math_content,
-                'math_type': 'latex',
-            }
-        }
-    elif para_type == BlockType.IMAGE:
-        image_caption = []
-        image_path, _ = get_body_data(para_block)
-        image_source = {
-            'path': f"{img_buket_path}/{image_path}",
-        }
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.IMAGE_CAPTION:
-                image_caption.extend(merge_para_with_text_v2(block))
-        para_content = {
-            'type': ContentTypeV2.IMAGE,
-            'content': {
-                'image_source': image_source,
-                'image_caption': image_caption,
-            }
-        }
-    elif para_type == BlockType.TABLE:
-        table_caption = []
-        _, html = get_body_data(para_block)
-        if html.count("<table") > 1:
-            table_nest_level = 2
-        else:
-            table_nest_level = 1
-        if (
-                "colspan" in html or
-                "rowspan" in html or
-                table_nest_level > 1
-        ):
-            table_type = ContentTypeV2.TABLE_COMPLEX
-        else:
-            table_type = ContentTypeV2.TABLE_SIMPLE
-
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.TABLE_CAPTION:
-                table_caption.extend(merge_para_with_text_v2(block))
-        para_content = {
-            'type': ContentTypeV2.TABLE,
-            'content': {
-                'table_caption': table_caption,
-                'html': _format_embedded_html(html, img_buket_path),
-                'table_type': table_type,
-                'table_nest_level': table_nest_level,
-            }
-        }
-    elif para_type == BlockType.CHART:
-        chart_caption = []
-        image_path, chart_content = get_body_data(para_block)
-        for block in para_block['blocks']:
-            if block['type'] == BlockType.CHART_CAPTION:
-                chart_caption.extend(merge_para_with_text_v2(block))
-        para_content = {
-            'type': ContentTypeV2.CHART,
-            'content': {
-                'image_source': {
-                    'path': _build_media_path(img_buket_path, image_path),
-                },
-                'content': _format_embedded_html(chart_content, img_buket_path),
-                'chart_caption': chart_caption,
-            }
-        }
-    elif para_type == BlockType.LIST:
-        list_type = ContentTypeV2.LIST_TEXT
-        attribute = para_block.get('attribute', 'unordered')
-        para_content = {
-            'type': ContentTypeV2.LIST,
-            'content': {
-                'list_type': list_type,
-                'attribute': attribute,
-                'list_items': _flatten_list_items_v2(para_block),
-            }
-        }
-    elif para_type == BlockType.INDEX:
-        para_content = {
-            'type': ContentTypeV2.INDEX,
-            'content': {
-                'list_type': ContentTypeV2.LIST_TEXT,
-                'list_items': _flatten_list_items_v2(para_block),
-            }
-        }
-
+    builders = {
+        BlockType.TITLE: lambda: _v2_title_content(para_block),
+        BlockType.TEXT: lambda: _v2_paragraph_content(para_block),
+        BlockType.INTERLINE_EQUATION: lambda: _v2_equation_content(para_block),
+        BlockType.IMAGE: lambda: _v2_image_content(para_block, img_buket_path),
+        BlockType.TABLE: lambda: _v2_table_content(para_block, img_buket_path),
+        BlockType.CHART: lambda: _v2_chart_content(para_block, img_buket_path),
+        BlockType.LIST: lambda: _v2_list_content(para_block),
+        BlockType.INDEX: lambda: _v2_index_content(para_block),
+    }
+    header_types = [BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_FOOTNOTE]
+    para_content = _v2_header_footer_content(para_block, para_type) if para_type in header_types else builders.get(para_type, dict)()
     anchor = para_block.get("anchor")
     if isinstance(anchor, str) and anchor.strip():
         para_content["anchor"] = anchor.strip()
-
     return para_content
 
 
+def _body_data_from_span(span: dict) -> tuple[str, str]:
+    span_type = span.get('type')
+    extractors = {
+        ContentType.TABLE: lambda: (span.get('image_path', ''), span.get('html', '')),
+        ContentType.CHART: lambda: (span.get('image_path', ''), span.get('content', '')),
+        ContentType.IMAGE: lambda: (span.get('image_path', ''), ''),
+        ContentType.INTERLINE_EQUATION: lambda: (span.get('image_path', ''), span.get('content', '')),
+        ContentType.TEXT: lambda: ('', span.get('content', '')),
+    }
+    return extractors.get(span_type, lambda: ('', ''))()
+
+
+def _body_data_from_spans(lines) -> tuple[str, str]:
+    for line in lines:
+        for span in line.get('spans', []):
+            result = _body_data_from_span(span)
+            if result != ('', ''):
+                return result
+    return '', ''
+
+
+def _body_data_from_child_blocks(para_block: dict) -> tuple[str, str]:
+    body_types = [BlockType.IMAGE_BODY, BlockType.TABLE_BODY, BlockType.CHART_BODY, BlockType.CODE_BODY]
+    for block in para_block['blocks']:
+        block_type = block.get('type')
+        if block_type not in body_types:
+            continue
+        result = _body_data_from_spans(block.get('lines', []))
+        if result != ('', ''):
+            return result
+        if block_type == BlockType.CHART_BODY:
+            return result
+    return '', ''
+
+
 def get_body_data(para_block):
-    """
-    Extract image_path and body content from para_block
-    Returns:
-        - For IMAGE/INTERLINE_EQUATION: (image_path, '')
-        - For TABLE: (image_path, html)
-        - For CHART: (image_path, content)
-        - Default: ('', '')
-    """
-
-    def get_data_from_spans(lines):
-        for line in lines:
-            for span in line.get('spans', []):
-                span_type = span.get('type')
-                if span_type == ContentType.TABLE:
-                    return span.get('image_path', ''), span.get('html', '')
-                elif span_type == ContentType.CHART:
-                    return span.get('image_path', ''), span.get('content', '')
-                elif span_type == ContentType.IMAGE:
-                    return span.get('image_path', ''), ''
-                elif span_type == ContentType.INTERLINE_EQUATION:
-                    return span.get('image_path', ''), span.get('content', '')
-                elif span_type == ContentType.TEXT:
-                    return '', span.get('content', '')
-        return '', ''
-
-    # 处理嵌套的 blocks 结构
+    """Extract image path and body content from a para block."""
     if 'blocks' in para_block:
-        for block in para_block['blocks']:
-            block_type = block.get('type')
-            if block_type in [BlockType.IMAGE_BODY, BlockType.TABLE_BODY, BlockType.CHART_BODY, BlockType.CODE_BODY]:
-                result = get_data_from_spans(block.get('lines', []))
-                if result != ('', ''):
-                    return result
-                if block_type == BlockType.CHART_BODY:
-                    return result
-        return '', ''
-
-    # 处理直接包含 lines 的结构
-    return get_data_from_spans(para_block.get('lines', []))
+        return _body_data_from_child_blocks(para_block)
+    return _body_data_from_spans(para_block.get('lines', []))
 
 
 def merge_para_with_text_v2(para_block):
@@ -1002,79 +1020,105 @@ def merge_para_with_text_v2(para_block):
     return para_content
 
 
+def _make_page_markdown(page_info: dict, make_mode: str, img_buket_path: str, tolerant: bool):
+    paras_of_layout = page_info.get('para_blocks')
+    page_idx = page_info.get('page_idx')
+    if not paras_of_layout:
+        return []
+    if not tolerant:
+        return mk_blocks_to_markdown(paras_of_layout, make_mode, img_buket_path, page_idx=page_idx)
+    page_markdown = []
+    for para_block in paras_of_layout:
+        try:
+            page_markdown.extend(
+                mk_blocks_to_markdown([para_block], make_mode, img_buket_path, page_idx=page_idx)
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Skipping DOCX markdown block on page {page_idx} "
+                f"due to {type(exc).__name__}: {exc}"
+            )
+    return page_markdown
+
+
+def _make_page_content_list(page_info: dict, img_buket_path: str, tolerant: bool):
+    page_idx = page_info.get('page_idx')
+    para_blocks = (page_info.get('para_blocks') or []) + (page_info.get('discarded_blocks') or [])
+    output_content = []
+    for para_block in para_blocks:
+        try:
+            para_content = make_blocks_to_content_list(para_block, img_buket_path, page_idx)
+        except Exception as exc:
+            if not tolerant:
+                raise
+            logger.warning(
+                f"Skipping DOCX content-list block on page {page_idx} "
+                f"due to {type(exc).__name__}: {exc}"
+            )
+            continue
+        output_content.append(para_content)
+    return output_content
+
+
+def _make_page_content_list_v2(page_info: dict, img_buket_path: str, tolerant: bool):
+    page_idx = page_info.get('page_idx')
+    para_blocks = (page_info.get('para_blocks') or []) + (page_info.get('discarded_blocks') or [])
+    page_contents = []
+    for para_block in para_blocks:
+        try:
+            para_content = make_blocks_to_content_list_v2(para_block, img_buket_path)
+        except Exception as exc:
+            if not tolerant:
+                raise
+            logger.warning(
+                f"Skipping DOCX content-list-v2 block on page {page_idx} "
+                f"due to {type(exc).__name__}: {exc}"
+            )
+            continue
+        page_contents.append(para_content)
+    return page_contents
+
+
+def _union_make_page_content(
+    page_info: dict,
+    make_mode: str,
+    img_buket_path: str,
+    tolerant: bool,
+):
+    builders = {
+        MakeMode.CONTENT_LIST: _make_page_content_list,
+        MakeMode.CONTENT_LIST_V2: _make_page_content_list_v2,
+    }
+    if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
+        return _make_page_markdown(page_info, make_mode, img_buket_path, tolerant)
+    builder = builders.get(make_mode)
+    if builder is None:
+        return None
+    return builder(page_info, img_buket_path, tolerant)
+
+
+def _union_make_result(output_content: list, make_mode: str):
+    if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
+        return '\n\n'.join(output_content)
+    if make_mode in [MakeMode.CONTENT_LIST, MakeMode.CONTENT_LIST_V2]:
+        return output_content
+    return None
+
+
 def union_make(pdf_info_dict: list,
                make_mode: str,
                img_buket_path: str = '',
                tolerant: bool = True,
                ):
-
     output_content = []
     for page_info in pdf_info_dict:
-        paras_of_layout = page_info.get('para_blocks')
-        paras_of_discarded = page_info.get('discarded_blocks')
-        page_idx = page_info.get('page_idx')
-        if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
-            if not paras_of_layout:
-                continue
-            if tolerant:
-                page_markdown = []
-                for para_block in paras_of_layout:
-                    try:
-                        page_markdown.extend(
-                            mk_blocks_to_markdown(
-                                [para_block],
-                                make_mode,
-                                img_buket_path,
-                                page_idx=page_idx,
-                            )
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            f"Skipping DOCX markdown block on page {page_idx} "
-                            f"due to {type(exc).__name__}: {exc}"
-                        )
-            else:
-                page_markdown = mk_blocks_to_markdown(paras_of_layout, make_mode, img_buket_path,
-                                                       page_idx=page_idx)
-            output_content.extend(page_markdown)
-        elif make_mode == MakeMode.CONTENT_LIST:
-            para_blocks = (paras_of_layout or []) + (paras_of_discarded or [])
-            if not para_blocks:
-                continue
-            for para_block in para_blocks:
-                try:
-                    para_content = make_blocks_to_content_list(para_block, img_buket_path, page_idx)
-                except Exception as exc:
-                    if not tolerant:
-                        raise
-                    logger.warning(
-                        f"Skipping DOCX content-list block on page {page_idx} "
-                        f"due to {type(exc).__name__}: {exc}"
-                    )
-                    continue
-                output_content.append(para_content)
-        elif make_mode == MakeMode.CONTENT_LIST_V2:
-            # https://github.com/drunkpig/llm-webkit-mirror/blob/dev6/docs/specification/output_format/content_list_spec.md
-            para_blocks = (paras_of_layout or []) + (paras_of_discarded or [])
-            page_contents = []
-            if para_blocks:
-                for para_block in para_blocks:
-                    try:
-                        para_content = make_blocks_to_content_list_v2(para_block, img_buket_path)
-                    except Exception as exc:
-                        if not tolerant:
-                            raise
-                        logger.warning(
-                            f"Skipping DOCX content-list-v2 block on page {page_idx} "
-                            f"due to {type(exc).__name__}: {exc}"
-                        )
-                        continue
-                    page_contents.append(para_content)
-            output_content.append(page_contents)
-
-    if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
-        return '\n\n'.join(output_content)
-    elif make_mode in [MakeMode.CONTENT_LIST, MakeMode.CONTENT_LIST_V2]:
-        return output_content
-    return None
-
+        page_content = _union_make_page_content(
+            page_info, make_mode, img_buket_path, tolerant
+        )
+        if page_content is None:
+            continue
+        if make_mode == MakeMode.CONTENT_LIST_V2:
+            output_content.append(page_content)
+        else:
+            output_content.extend(page_content)
+    return _union_make_result(output_content, make_mode)
